@@ -11,7 +11,7 @@
 ## 安装与历史
 
 - macOS：当前本机构建为 Apple Silicon arm64，使用系统 WKWebView。把 `Shikuang.app` 放入“应用程序”，从 Finder 打开。当前仅临时签名，尚未取得 Developer ID 签名或公证；Intel Mac 没有构建验证。
-- Windows：构建目标为 x64，完整解压后运行 `Shikuang/Shikuang.exe`，请保留旁边所有文件。包内提供固定版 WebView2，不依赖预装 Edge。实际 Windows 运行门通过前，不能把构建目标称为已验证的支持平台。Windows 10/11 实体电脑和相机仍需后续实测。
+- Windows：构建目标为 x64，完整解压后运行 `Shikuang/Shikuang.exe`，请保留旁边所有文件。包内提供固定版 WebView2，不依赖预装 Edge。已在 GitHub Windows Server 2022 x64 运行真实安装包并通过断网与重启门；Windows 10/11 实体电脑和相机仍需后续实测。
 - 更新前在旧 App 的“标本”页面导出备份。程序保留原 `http://127.0.0.1:8000` 地址与 macOS `Shikuang` 应用身份，开启持久存储；不会主动删除历史。旧版隐私模式已经清除的数据无法恢复，浏览器、手机和桌面各自的数据也不会自动合并。必要时通过备份导入迁移。
 - 已有程序或其他服务占用 8000 端口时会明确退出。关闭旧识矿窗口后重试；不会连接未知服务，也不会换地址造成历史看似消失。关闭窗口会停止本机静态服务并释放单实例锁。
 

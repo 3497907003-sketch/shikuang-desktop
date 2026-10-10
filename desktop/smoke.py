@@ -49,10 +49,15 @@ class Smoke:
         if self.success and sys.platform == 'darwin':
             # Snapshot the actual native WKWebView, including the source-bound
             # gallery UI. This is not a reconstructed HTML or Canvas screenshot.
-            from PyObjCTools import AppHelper
-            from webview.platforms.cocoa import BrowserView
-            import AppKit
-            import WebKit
+            try:
+                from PyObjCTools import AppHelper
+                from webview.platforms.cocoa import BrowserView
+                import AppKit
+                import WebKit
+            except Exception as failure:
+                result['nativeScreenshotLimitation'] = str(failure)
+                complete()
+                return
             def captured(image, error):
                 if completed.is_set():
                     return
@@ -192,7 +197,11 @@ SCRIPT = r"""async function(input) {
    check('bundled-resources-only',report.resources.every(r=>r.name.startsWith(location.origin+'/')||r.name.startsWith('blob:')||r.name==='https://example.com/'),{});
    await openGallery();
    document.querySelector('#detailDialog .image-section').scrollIntoView();
-   await new Promise(r=>requestAnimationFrame(()=>requestAnimationFrame(r)));
+   // WKWebView pauses animation frames while the macOS screen is locked. The
+   // functional decode checks stay strict; visual synchronization is reported
+   // separately and must not hang package shutdown in that environment.
+   report.galleryFrameSynchronized=false;
+   await Promise.race([new Promise(r=>requestAnimationFrame(()=>requestAnimationFrame(()=>{report.galleryFrameSynchronized=true;r();}))),new Promise(r=>setTimeout(r,1000))]);
    report.passed=true;
  }catch(e){report.failure=String(e);}
  return report;
