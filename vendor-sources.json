@@ -1,0 +1,14 @@
+{
+  "schema_version": 1,
+  "webview2": {
+    "version": "155.0.4283.45",
+    "architecture": "x64",
+    "url": "https://msedge.sf.dl.delivery.mp.microsoft.com/filestreamingservice/files/01b0fbd9-6ea3-4e12-818a-a71f73f3855b/Microsoft.WebView2.FixedVersionRuntime.155.0.4283.45.x64.cab",
+    "bytes": 310544938,
+    "sha256": "ec533bf1b7354d288703cf821a2d640d0130108224f93e330bb9c09faf3f8010",
+    "source_page": "https://developer.microsoft.com/en-us/microsoft-edge/webview2/",
+    "distribution_reference": "https://learn.microsoft.com/en-us/microsoft-edge/webview2/concepts/distribution",
+    "retrieved_at": "2026-10-11",
+    "license": "Microsoft WebView2 Runtime distribution terms; preserve all supplied runtime files and license notices"
+  }
+}

@@ -1,0 +1,12 @@
+.venv/
+__pycache__/
+*.pyc
+build/
+dist/
+web/
+vendor/
+artifacts/
+*.cab
+*.zip
+*.dmg
+

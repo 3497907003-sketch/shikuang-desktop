@@ -1,0 +1,7 @@
+{
+  "schema_version": 1,
+  "app_version": "2.5.0-preview.1",
+  "web_commit": "e42e56d87eec3b7147b08fb51b99415358e2db54",
+  "model_version": "inherited-2.0-audited",
+  "model_manifest_sha256": "ddbe27e79489df0ff63647b37c17f701e458a59e076df14d47d93873085ae7fa"
+}
