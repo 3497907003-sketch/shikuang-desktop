@@ -1,0 +1,89 @@
+name: Verify Windows artifact and upload draft only
+on:
+  workflow_dispatch:
+    inputs:
+      verified_windows_run_id:
+        description: Successful desktop.yml run containing the tested Windows package
+        required: true
+        type: string
+        default: '38072571180'
+      source_commit:
+        description: Immutable desktop commit actually built and runtime-tested
+        required: true
+        type: string
+        default: '3f94d9aeae55cd8c1bb342ab3e937c8f2307c262'
+      tag:
+        description: Draft prerelease tag; never published by this workflow
+        required: true
+        type: string
+        default: v2.5.0-preview.1
+permissions:
+  contents: write
+  actions: read
+concurrency:
+  group: verified-windows-draft-upload
+  cancel-in-progress: false
+jobs:
+  verify-and-stage:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 40
+    env:
+      GH_TOKEN: ${{ github.token }}
+      RUN_ID: ${{ inputs.verified_windows_run_id }}
+      SOURCE_COMMIT: ${{ inputs.source_commit }}
+      RELEASE_TAG: ${{ inputs.tag }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+          path: uploader
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+      - name: Test delivery guards without any upload
+        working-directory: uploader
+        run: python -m unittest discover -s tests -p test_delivery.py -v
+      - name: Guard build provenance and draft target
+        id: guard
+        run: |
+          python uploader/tools/verify_windows_delivery.py guard \
+            --repository "$GITHUB_REPOSITORY" --run-id "$RUN_ID" \
+            --source-commit "$SOURCE_COMMIT" --tag "$RELEASE_TAG" \
+            --output "$RUNNER_TEMP/verified-context.json" --github-output "$GITHUB_OUTPUT"
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ steps.guard.outputs.source_commit }}
+          persist-credentials: false
+          path: verified-desktop
+      - uses: actions/checkout@v4
+        with:
+          repository: 3497907003-sketch/shikuang-app
+          ref: ${{ steps.guard.outputs.web_commit }}
+          persist-credentials: false
+          path: verified-web
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+      - name: Build authoritative immutable Web asset set
+        working-directory: verified-web
+        run: |
+          npm ci
+          npm run check
+          npm run build
+      - name: Verify full artifact, binary, seals and two actual offline runtime phases
+        run: |
+          python uploader/tools/verify_windows_delivery.py verify-download \
+            --context "$RUNNER_TEMP/verified-context.json" \
+            --desktop-source verified-desktop --web-dist verified-web/dist \
+            --output "$RUNNER_TEMP/windows-delivery"
+      - name: Upload Windows only to reviewed draft prerelease
+        run: |
+          python uploader/tools/verify_windows_delivery.py upload \
+            --context "$RUNNER_TEMP/verified-context.json" --directory "$RUNNER_TEMP/windows-delivery"
+      - name: Keep verification report even if staging fails
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: windows-draft-verification
+          path: ${{ runner.temp }}/windows-delivery/windows-gate-report.json
+          if-no-files-found: ignore

@@ -32,3 +32,11 @@ python -m PyInstaller --noconfirm Shikuang.spec
 固定版 Microsoft WebView2 155.0.4283.45 x64 的官方 CAB 为 310,544,938 字节，来源及 SHA 记录在 `vendor-sources.json`。构建保留完整运行时和其许可文件，验证微软可执行签名，按官方要求配置读取权限。该运行时不自动更新，需要随后续 App 发布维护；不得删掉组件缩减为依赖在线安装的包。[Microsoft 固定运行时分发说明](https://learn.microsoft.com/en-us/microsoft-edge/webview2/concepts/distribution)。
 
 实际相机权限、系统文件选择与保存窗口、各实验室实体设备、Windows 10/11 和 Intel Mac 的交互需要分别验证。不得把自动化识别检查当成人工操作验证或准确率验收。
+
+## Windows 草稿上传校验
+
+`.github/workflows/draft-upload.yml` 只提供手动调度，不自动运行或公开发布。输入已经成功的 `desktop.yml` run、实际构建的桌面提交和预览 tag；当前仅接受经过验证的 `3f94d9a` 完整提交及 `v2.5.0-preview.1`。上传器自身的提交不冒充安装包的构建提交。
+
+流程重新核验 Actions 外包摘要、安装包 SHA256/CRC/x64 PE、固定 WebView2 的全部 256 个文件、同一网页提交的 157 个资产，以及两个真实断网进程的矿物/非矿物、取消、图库、历史重启与本地资源证据。Windows 运行证据来自 Windows Server 2022 x64，未包含原生截图，不代表人工拍照、文件保存面板或实体 Windows 10/11 测试，也不是 Kappa 结果。上传仅增加 Windows ZIP、Windows 校验和与 gate 报告；同 tag 的公开 release、错误目标、不同已有 Windows 文件均会被拒绝，macOS 文件不会删除或覆盖。
+
+GitHub 要求手动调度 workflow 已存在于默认分支。首次使用前需完成该流程文件的代码审查与合入；运行流程仍按输入的固定构建提交核验，而不是重新打包当前分支。
