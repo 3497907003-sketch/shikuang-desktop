@@ -37,7 +37,13 @@ class Smoke:
             'accuracy_claim': False, 'physicalNetworkDisabled': False})
         self.success = result.get('passed') is True
         self.report.parent.mkdir(parents=True, exist_ok=True)
+        completed = threading.Event()
+        completion_lock = threading.Lock()
         def complete():
+            with completion_lock:
+                if completed.is_set():
+                    return
+                completed.set()
             self.report.write_text(json.dumps(result, ensure_ascii=False, indent=2) + '\n', encoding='utf-8')
             self.window.destroy()
         if self.success and sys.platform == 'darwin':
@@ -48,6 +54,9 @@ class Smoke:
             import AppKit
             import WebKit
             def captured(image, error):
+                if completed.is_set():
+                    return
+                snapshot_deadline.cancel()
                 try:
                     if error or image is None:
                         raise RuntimeError('WKWebView snapshot unavailable')
@@ -67,6 +76,12 @@ class Smoke:
                 except Exception as failure:
                     result['nativeScreenshotLimitation'] = str(failure)
                     complete()
+            def expired():
+                result['nativeScreenshotLimitation'] = 'Native WK snapshot did not finish within 10 seconds; functional checks completed separately'
+                complete()
+            snapshot_deadline = threading.Timer(10, expired)
+            snapshot_deadline.daemon = True
+            snapshot_deadline.start()
             AppHelper.callAfter(snapshot)
         else:
             complete()
@@ -153,6 +168,7 @@ SCRIPT = r"""async function(input) {
    const galleryBefore=await SpecimenStore.list();
    location.hash='library';
    await waitFor(()=>!document.getElementById('view-library').hidden,'library route');
+   await waitFor(()=>document.getElementById('catalogIntro').textContent.includes('6239'),'complete library UI index');
    const search=document.getElementById('librarySearch');search.value='Quartz';search.dispatchEvent(new Event('input',{bubbles:true}));
    const card=await waitFor(()=>Array.from(document.querySelectorAll('#view-library [data-detail]')).find(b=>/^(?:quartz|catalog:ima-quartz)$/.test(b.dataset.detail)),'quartz card');
    const openGallery=async()=>{card.click();const section=await waitFor(()=>document.querySelector('#detailDialog[open] .image-section'),'quartz gallery');section.open=true;section.dispatchEvent(new Event('toggle'));await waitFor(()=>Array.from(section.querySelectorAll('img')).filter(i=>i.complete && i.naturalWidth>=224 && i.naturalHeight>=224).length===3,'3 real gallery images');return section;};
