@@ -1,0 +1,99 @@
+name: Build and run offline Windows desktop
+on:
+  push:
+    branches: [codex/shikuang-2.5]
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  windows:
+    runs-on: windows-2022
+    timeout-minutes: 35
+    steps:
+      - name: Keep immutable source assets byte-identical on Windows
+        shell: pwsh
+        run: git config --global core.autocrlf false
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+          path: desktop
+      - name: Read immutable shared Web source identity
+        id: source
+        shell: pwsh
+        run: |
+          $Identity = Get-Content -Raw -Encoding UTF8 desktop/web-source.json | ConvertFrom-Json
+          if ($Identity.web_commit -notmatch '^[a-f0-9]{40}$') { throw 'Source must be an immutable full commit SHA' }
+          'commit=' + $Identity.web_commit >> $env:GITHUB_OUTPUT
+      - uses: actions/checkout@v4
+        with:
+          repository: 3497907003-sketch/shikuang-app
+          ref: ${{ steps.source.outputs.commit }}
+          persist-credentials: false
+          path: web-source
+      - uses: actions/checkout@v4
+        with:
+          repository: 3497907003-sketch/shikuang-android
+          ref: main
+          persist-credentials: false
+          path: android-source
+          sparse-checkout: android/app/src/androidTest/assets
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+          architecture: x64
+      - name: Build the exact shared Web assets and model contract
+        working-directory: web-source
+        run: |
+          npm ci
+          if ($LASTEXITCODE -ne 0) { throw 'Shared Web dependency installation failed' }
+          npm test
+          if ($LASTEXITCODE -ne 0) { throw 'Shared Web regression tests failed' }
+          npm run check
+          if ($LASTEXITCODE -ne 0) { throw 'Shared Web resource contract failed' }
+          npm run build
+          if ($LASTEXITCODE -ne 0) { throw 'Shared Web build failed' }
+      - name: Seal desktop resources and prepare fixed Microsoft runtime
+        working-directory: desktop
+        shell: pwsh
+        run: |
+          python -m pip install -r requirements-desktop.txt
+          if ($LASTEXITCODE -ne 0) { throw 'Desktop dependency installation failed' }
+          python tools/sync_web.py ../web-source/dist --web-commit '${{ steps.source.outputs.commit }}'
+          if ($LASTEXITCODE -ne 0) { throw 'Shared resource sync failed' }
+          ./tools/prepare_webview2.ps1
+          python tools/make_icons.py
+          if ($LASTEXITCODE -ne 0) { throw 'Desktop icon packaging failed' }
+          python -m unittest discover -s tests -v
+          if ($LASTEXITCODE -ne 0) { throw 'Desktop tests failed' }
+          node --test tests/bridge.test.cjs
+          if ($LASTEXITCODE -ne 0) { throw 'Desktop bridge lifecycle tests failed' }
+          python desktop/run_app.py --verify-only
+          if ($LASTEXITCODE -ne 0) { throw 'Desktop asset seal failed' }
+          python -m PyInstaller --noconfirm Shikuang.spec
+          if ($LASTEXITCODE -ne 0) { throw 'Windows package build failed' }
+      - name: Real package offline launch, recognition and persistent restart
+        working-directory: desktop
+        shell: pwsh
+        run: ./tools/windows_offline_smoke.ps1
+      - name: Pack verified Windows artifact without publishing
+        if: success()
+        working-directory: desktop
+        shell: pwsh
+        run: |
+          $Identity = Get-Content -Raw -Encoding UTF8 web-source.json | ConvertFrom-Json
+          $Zip = 'artifacts/Shikuang-' + $Identity.app_version + '-windows-x64.zip'
+          Copy-Item README.md dist/Shikuang/README.md
+          Compress-Archive dist/Shikuang $Zip
+          Get-FileHash $Zip -Algorithm SHA256 | Format-List | Out-File -Encoding UTF8 ($Zip + '.sha256.txt')
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: windows-x64-build-and-runtime
+          path: |
+            desktop/artifacts/
+            desktop/web-source.json
+            desktop/build/Shikuang/warn-Shikuang.txt
+          if-no-files-found: warn
