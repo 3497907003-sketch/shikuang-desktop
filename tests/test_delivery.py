@@ -142,15 +142,24 @@ class DeliveryGuards(unittest.TestCase):
                 d.validate_network(dict(p, **{key: 1}))
 
     def test_zip_rejects_escape_symlink_and_case_collision(self):
-        for rows in ([('../escape', b'x')], [('C:/x', b'x')], [('a\\b', b'x')],
+        for rows in ([('../escape', b'x')], [('C:/x', b'x')], [('a\\b', b'x')], [('safe\x00hidden', b'x')],
                      [('Same', b'x'), ('same', b'y')]):
             stream = io.BytesIO()
             with zipfile.ZipFile(stream, 'w') as archive:
                 for name, data in rows:
-                    archive.writestr(name, data)
+                    # ZipInfo's constructor replaces the host path separator.
+                    # On Windows, passing a backslash name to writestr(str)
+                    # would silently turn the hostile fixture into a safe path.
+                    # Preserve the actual archive filename on every test host.
+                    entry = zipfile.ZipInfo('fixture')
+                    entry.filename = entry.orig_filename = name
+                    archive.writestr(entry, data)
             stream.seek(0)
-            with zipfile.ZipFile(stream) as archive, self.assertRaises(ValueError):
-                d.inspect_zip(archive)
+            with self.subTest(paths=[name for name, _ in rows]), zipfile.ZipFile(stream) as archive:
+                self.assertEqual([entry.orig_filename for entry in archive.infolist()],
+                                 [name for name, _ in rows])
+                with self.assertRaises(ValueError):
+                    d.inspect_zip(archive)
         stream = io.BytesIO()
         with zipfile.ZipFile(stream, 'w') as archive:
             link = zipfile.ZipInfo('link')

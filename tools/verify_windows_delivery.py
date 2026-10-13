@@ -128,6 +128,10 @@ def inspect_zip(archive):
     names, folded, total = {}, set(), 0
     require(len(archive.infolist()) < 10000, 'Too many ZIP entries')
     for info in archive.infolist():
+        # ZipInfo normalizes host separators on Windows and truncates NULs.
+        # Validate the original archive spelling before using its parsed name.
+        require(valid_relative(info.orig_filename) and info.filename == info.orig_filename,
+                'Unsafe or normalized ZIP path: ' + info.orig_filename)
         require(valid_relative(info.filename), 'Unsafe ZIP path: ' + info.filename)
         require(info.filename not in names and info.filename.casefold() not in folded,
                 'Duplicate or case-colliding ZIP path: ' + info.filename)
