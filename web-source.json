@@ -1,21 +1,21 @@
 {
   "schema_version": 1,
   "app_version": "2.5.0-preview.1",
-  "web_commit": "ce6d8946699f1ae016ee9e1d9af4d73d0979e8f8",
+  "web_commit": "6f637907adeddf7308d91bbbc3ca411987bd8d8b",
   "model_version": "inherited-2.0-audited",
   "model_manifest_sha256": "ddbe27e79489df0ff63647b37c17f701e458a59e076df14d47d93873085ae7fa",
   "web_build_inputs": {
     "tools/build.cjs": {
-      "bytes": 3840,
-      "sha256": "e26fb6e3fac0eece70cf7b72caf1efef5ad863f816187bf388e220eb88dcca64"
+      "bytes": 3904,
+      "sha256": "3b87d455d472d7b4dc82da8ae1af85bc9236b84785cd0b0dfe87940b8232a0c5"
     },
     "tools/onnx-contract.cjs": {
       "bytes": 3073,
       "sha256": "89b0c1ffa4ab9b4f892eb47b6aadc2fc59214839ab5e2c4dc0b0eee24b84b81f"
     },
     "tools/shell-release.cjs": {
-      "bytes": 1681,
-      "sha256": "70cb85178d6af7476a61863e9af428c272bcb80de19cdfd30aa7bb59ee4e6823"
+      "bytes": 2862,
+      "sha256": "74a6c4ecfe81dde44ed08f726fdc360af010731805e42635228e935f9e67be4d"
     }
   }
 }
