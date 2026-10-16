@@ -29,6 +29,8 @@ python -m PyInstaller --noconfirm Shikuang.spec
 
 `sync_web.py` 将每一项构建资产与指定 commit 比对，核验模型及资料 SHA-256，并生成完整本地资源清单；拒绝过期构建、混入权重和缺失资料。Windows 构建还需运行 `tools/prepare_webview2.ps1`。CI 使用固定源提交并执行真实安装包启动、石英识别、非矿物拒判、取消后重试、资料库读取、关闭重启和历史保留。Windows 测试实际禁用外部网络适配器并检查无默认路由，最后恢复网络；macOS 本机测试在 WKWebView 层阻断外部 HTTP(S)，不是关闭整机网络。
 
+共享网页现使用内容生成的缓存标识。同步器从指定不可变提交提取原始资产和构建工具，在临时目录重现该构建，再逐字节比对完整 dist，支持 HTML/Core/Worker 的合法构建变换；不直接信任待同步目录，也不放宽过期或篡改校验。构建工具身份同时记录在 `web-source.json`。资源同步及本地回归不代表新的桌面安装包、实体设备或识别准确率已验收。
+
 固定版 Microsoft WebView2 155.0.4283.45 x64 的官方 CAB 为 310,544,938 字节，来源及 SHA 记录在 `vendor-sources.json`。构建保留完整运行时和其许可文件，验证微软可执行签名，按官方要求配置读取权限。该运行时不自动更新，需要随后续 App 发布维护；不得删掉组件缩减为依赖在线安装的包。[Microsoft 固定运行时分发说明](https://learn.microsoft.com/en-us/microsoft-edge/webview2/concepts/distribution)。
 
 实际相机权限、系统文件选择与保存窗口、各实验室实体设备、Windows 10/11 和 Intel Mac 的交互需要分别验证。不得把自动化识别检查当成人工操作验证或准确率验收。

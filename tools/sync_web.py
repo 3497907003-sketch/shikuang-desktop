@@ -15,6 +15,49 @@ def digest(path):
         return hashlib.file_digest(stream, 'sha256').hexdigest()
 
 
+def verify_committed_build(dist: Path, source_root: Path, web_commit: str) -> dict:
+    """Reproduce committed build transforms; never trust a rendered dist alone."""
+    names = []
+    for path in sorted(dist.rglob('*')):
+        if path.is_symlink():
+            raise ValueError('Symlink in bundle: ' + str(path))
+        if not path.is_file():
+            continue
+        name = path.relative_to(dist).as_posix()
+        if any(part.startswith('.') for part in Path(name).parts) or name.endswith(('.pt', '.pkl', '.safetensors')):
+            raise ValueError('Unexpected asset: ' + name)
+        names.append(name)
+    tools = ['tools/build.cjs', 'tools/onnx-contract.cjs']
+    helper = 'tools/shell-release.cjs'
+    if subprocess.run(['git', '-C', str(source_root), 'cat-file', '-e', web_commit + ':' + helper],
+                      stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL).returncode == 0:
+        tools.append(helper)
+    build_inputs = {}
+    # The canonical builder validates its complete asset/model/reference set.
+    # Recreating its immutable inputs also detects a missing dist member: the
+    # builder cannot succeed with that required source file absent.
+    with tempfile.TemporaryDirectory(prefix='shikuang-build-') as temporary:
+        staging = Path(temporary)
+        for name in names + tools:
+            committed = subprocess.check_output(['git', '-C', str(source_root), 'show', web_commit + ':' + name])
+            destination = staging / name
+            destination.parent.mkdir(parents=True, exist_ok=True)
+            destination.write_bytes(committed)
+            if name in tools:
+                build_inputs[name] = {'bytes': len(committed), 'sha256': hashlib.sha256(committed).hexdigest()}
+        result = subprocess.run(['node', 'tools/build.cjs'], cwd=staging, capture_output=True, text=True, timeout=120)
+        if result.returncode:
+            raise ValueError('Immutable shared Web build failed: ' + (result.stderr or result.stdout)[-4000:])
+        expected = staging / 'dist'
+        built_names = sorted(path.relative_to(expected).as_posix() for path in expected.rglob('*') if path.is_file())
+        if built_names != names:
+            raise ValueError('Dist asset set differs from immutable shared Web build')
+        for name in names:
+            if digest(expected / name) != digest(dist / name):
+                raise ValueError('Stale dist asset: ' + name)
+    return build_inputs
+
+
 def sync(dist: Path, target: Path, web_ref: str = 'HEAD', source_repo: Path | None = None) -> dict:
     dist = dist.resolve()
     root = target.resolve().parent
@@ -22,6 +65,7 @@ def sync(dist: Path, target: Path, web_ref: str = 'HEAD', source_repo: Path | No
         raise ValueError('Destination must be outside source dist')
     source_root = source_repo.resolve() if source_repo else dist.parent
     web_commit = subprocess.check_output(['git', '-C', str(source_root), 'rev-parse', '--verify', web_ref + '^{commit}'], text=True).strip()
+    build_inputs = verify_committed_build(dist, source_root, web_commit)
     model = json.loads((dist / 'model-manifest.json').read_text(encoding='utf-8'))
     files = {}
     for path in sorted(dist.rglob('*')):
@@ -32,11 +76,6 @@ def sync(dist: Path, target: Path, web_ref: str = 'HEAD', source_repo: Path | No
         name = path.relative_to(dist).as_posix()
         if name.startswith('.') or name.endswith(('.pt', '.pkl', '.safetensors')):
             raise ValueError('Unexpected asset: ' + name)
-        # Compare to the exact immutable commit, not another agent's in-progress
-        # working tree. Every asset in this dist must come from the same source.
-        committed = subprocess.check_output(['git', '-C', str(source_root), 'show', web_commit + ':' + name])
-        if hashlib.sha256(committed).hexdigest() != digest(path):
-            raise ValueError('Stale dist asset: ' + name)
         files[name] = {'bytes': path.stat().st_size, 'sha256': digest(path)}
     model_paths = {row['path'] for row in model['models']}
     if {name for name in files if name.startswith('models/')} != model_paths:
@@ -51,7 +90,8 @@ def sync(dist: Path, target: Path, web_ref: str = 'HEAD', source_repo: Path | No
             raise ValueError('Reference identity mismatch: ' + row['path'])
     manifest = {'schema_version': 1, 'app_version': json.loads((dist / 'version.json').read_text())['version'],
                 'web_commit': web_commit, 'model_version': model['version'],
-                'model_manifest_sha256': digest(dist / 'model-manifest.json'), 'files': files}
+                'model_manifest_sha256': digest(dist / 'model-manifest.json'),
+                'web_build_inputs': build_inputs, 'files': files}
     root.mkdir(parents=True, exist_ok=True)
     with tempfile.TemporaryDirectory(prefix='shikuang-web-', dir=root) as temporary:
         staging = Path(temporary) / 'web'
