@@ -4,6 +4,7 @@ from __future__ import annotations
 import argparse
 import hashlib
 import json
+import re
 import shutil
 import subprocess
 import tempfile
@@ -13,6 +14,38 @@ from pathlib import Path
 def digest(path):
     with path.open('rb') as stream:
         return hashlib.file_digest(stream, 'sha256').hexdigest()
+
+
+def committed_build_tools(source_root: Path, web_commit: str) -> list[str]:
+    """Read the build-only dependency closure from the same immutable commit."""
+    manifest = 'tools/build-inputs.json'
+    exists = subprocess.run(['git', '-C', str(source_root), 'cat-file', '-e', web_commit + ':' + manifest],
+                            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL).returncode == 0
+    if exists:
+        raw = subprocess.check_output(['git', '-C', str(source_root), 'show', web_commit + ':' + manifest])
+        if len(raw) > 128 * 1024:
+            raise ValueError('Shared build input manifest is too large')
+        try:
+            tools = json.loads(raw)
+        except (ValueError, UnicodeDecodeError) as error:
+            raise ValueError('Invalid shared build input manifest') from error
+        if not isinstance(tools, list) or not 3 <= len(tools) <= 256:
+            raise ValueError('Shared build input manifest must list its complete tools')
+        if any(not isinstance(name, str) or not re.fullmatch(r'tools/[A-Za-z0-9._/-]+', name)
+               or any(part in ('', '.', '..') for part in name.split('/')) for name in tools):
+            raise ValueError('Unsafe shared build input path')
+        if len(tools) != len(set(tools)):
+            raise ValueError('Duplicate shared build input path')
+        if not {'tools/build.cjs', 'tools/onnx-contract.cjs', manifest}.issubset(tools):
+            raise ValueError('Shared build input manifest omits required inputs')
+        return tools
+    # Reproduce older commits with their original, dependency-free builder.
+    tools = ['tools/build.cjs', 'tools/onnx-contract.cjs']
+    helper = 'tools/shell-release.cjs'
+    if subprocess.run(['git', '-C', str(source_root), 'cat-file', '-e', web_commit + ':' + helper],
+                      stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL).returncode == 0:
+        tools.append(helper)
+    return tools
 
 
 def verify_committed_build(dist: Path, source_root: Path, web_commit: str) -> dict:
@@ -27,11 +60,7 @@ def verify_committed_build(dist: Path, source_root: Path, web_commit: str) -> di
         if any(part.startswith('.') for part in Path(name).parts) or name.endswith(('.pt', '.pkl', '.safetensors')):
             raise ValueError('Unexpected asset: ' + name)
         names.append(name)
-    tools = ['tools/build.cjs', 'tools/onnx-contract.cjs']
-    helper = 'tools/shell-release.cjs'
-    if subprocess.run(['git', '-C', str(source_root), 'cat-file', '-e', web_commit + ':' + helper],
-                      stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL).returncode == 0:
-        tools.append(helper)
+    tools = committed_build_tools(source_root, web_commit)
     build_inputs = {}
     # The canonical builder validates its complete asset/model/reference set.
     # Recreating its immutable inputs also detects a missing dist member: the

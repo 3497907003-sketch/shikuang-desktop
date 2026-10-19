@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import shutil
 import subprocess
 import tempfile
@@ -83,6 +84,54 @@ for(const [name,raw] of inputs)fs.writeFileSync('dist/'+name,Buffer.concat([raw,
             self.skipTest('Creating symlinks is unavailable on this host')
         with self.assertRaisesRegex(ValueError, 'Symlink in bundle'):
             verify_committed_build(self.dist, self.repo, self.commit)
+
+    def install_compiler_fixture(self):
+        vendor = self.repo / 'tools/vendor'
+        vendor.mkdir()
+        (vendor / 'compiler.cjs').write_text('fixed build-only compiler bytes', encoding='utf-8')
+        inputs = ['tools/build.cjs', 'tools/onnx-contract.cjs', 'tools/build-inputs.json', 'tools/vendor/compiler.cjs']
+        (self.repo / 'tools/build-inputs.json').write_text(json.dumps(inputs), encoding='utf-8')
+        builder = self.repo / 'tools/build.cjs'
+        builder.write_text(builder.read_text().replace("fs.readFileSync('tools/build.cjs')",
+                           "fs.readFileSync('tools/build.cjs'),fs.readFileSync('tools/vendor/compiler.cjs'),fs.readFileSync('tools/build-inputs.json')"), encoding='utf-8')
+        self.git('add', 'tools')
+        self.git('-c', 'user.name=Build fixture', '-c', 'user.email=fixture@example.invalid', 'commit', '-qm', 'Pinned build compiler')
+        self.commit = self.git('rev-parse', 'HEAD').strip()
+        subprocess.run(['node', 'tools/build.cjs'], cwd=self.repo, check=True, capture_output=True)
+        shutil.rmtree(self.dist)
+        shutil.copytree(self.repo / 'dist', self.dist)
+        return inputs
+
+    def test_build_compiler_is_reproduced_from_commit_without_node_modules(self):
+        inputs = self.install_compiler_fixture()
+        (self.repo / 'tools/vendor/compiler.cjs').write_text('dirty compiler', encoding='utf-8')
+        identity = verify_committed_build(self.dist, self.repo, self.commit)
+        self.assertEqual(set(identity), set(inputs))
+        self.assertFalse((self.repo / 'node_modules').exists())
+
+    def test_changed_committed_compiler_rejects_old_dist(self):
+        self.install_compiler_fixture()
+        (self.repo / 'tools/vendor/compiler.cjs').write_text('new compiler', encoding='utf-8')
+        self.git('add', 'tools/vendor/compiler.cjs')
+        self.git('-c', 'user.name=Build fixture', '-c', 'user.email=fixture@example.invalid', 'commit', '-qm', 'Compiler change')
+        with self.assertRaisesRegex(ValueError, 'Stale dist asset'):
+            verify_committed_build(self.dist, self.repo, self.git('rev-parse', 'HEAD').strip())
+
+    def test_build_input_manifest_cannot_escape_staging_directory(self):
+        self.install_compiler_fixture()
+        (self.repo / 'tools/build-inputs.json').write_text(json.dumps([
+            'tools/build.cjs', 'tools/onnx-contract.cjs', 'tools/build-inputs.json', 'tools/../../escape.cjs']), encoding='utf-8')
+        self.git('add', 'tools/build-inputs.json')
+        self.git('-c', 'user.name=Build fixture', '-c', 'user.email=fixture@example.invalid', 'commit', '-qm', 'Invalid build input')
+        with self.assertRaisesRegex(ValueError, 'Unsafe shared build input path'):
+            verify_committed_build(self.dist, self.repo, self.git('rev-parse', 'HEAD').strip())
+
+    def test_missing_build_compiler_cannot_fall_back_to_installed_dependency(self):
+        self.install_compiler_fixture()
+        self.git('rm', 'tools/vendor/compiler.cjs')
+        self.git('-c', 'user.name=Build fixture', '-c', 'user.email=fixture@example.invalid', 'commit', '-qm', 'Missing build compiler')
+        with self.assertRaises(subprocess.CalledProcessError):
+            verify_committed_build(self.dist, self.repo, self.git('rev-parse', 'HEAD').strip())
 
 
 if __name__ == '__main__':

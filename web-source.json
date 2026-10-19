@@ -1,21 +1,49 @@
 {
   "schema_version": 1,
   "app_version": "2.5.0-preview.1",
-  "web_commit": "036b9907429213d35df28928db8465d630db427e",
+  "web_commit": "04f962da75f48a698ebf355f3e0a840c2a476e3b",
   "model_version": "inherited-2.0-audited",
   "model_manifest_sha256": "ddbe27e79489df0ff63647b37c17f701e458a59e076df14d47d93873085ae7fa",
   "web_build_inputs": {
     "tools/build.cjs": {
-      "bytes": 3904,
-      "sha256": "3b87d455d472d7b4dc82da8ae1af85bc9236b84785cd0b0dfe87940b8232a0c5"
+      "bytes": 3710,
+      "sha256": "d064530073a8b8f53fb62efe5cbd66d8d8acca6dce419c38b1a60591456fd1be"
     },
     "tools/onnx-contract.cjs": {
       "bytes": 3073,
       "sha256": "89b0c1ffa4ab9b4f892eb47b6aadc2fc59214839ab5e2c4dc0b0eee24b84b81f"
     },
     "tools/shell-release.cjs": {
-      "bytes": 2862,
-      "sha256": "74a6c4ecfe81dde44ed08f726fdc360af010731805e42635228e935f9e67be4d"
+      "bytes": 3485,
+      "sha256": "8453ecf682681481438eef897777b37c606cfdcd4409aa6b840d0e555d404f60"
+    },
+    "tools/compat-js.cjs": {
+      "bytes": 4369,
+      "sha256": "dc3a1e442be3f5cbc054c5a7a09f45ae16ed41604fef5bb1e35976985fb78f46"
+    },
+    "tools/compat-target.json": {
+      "bytes": 684,
+      "sha256": "eaafbc0f1b6133fe7f1e5f6bcfda158057fcfd46a075ca4aac64b822eaa8fd38"
+    },
+    "tools/build-inputs.json": {
+      "bytes": 371,
+      "sha256": "ca68da62640829cc98bda96a208bafe41a3cf739ee5620840b6d343efb92de7e"
+    },
+    "tools/vendor/babel-standalone-8.0.7.cjs": {
+      "bytes": 2342327,
+      "sha256": "1eda1f8ef4611cf301094fe1559ff6c65426481c8fe210011cb574f32d53bbf2"
+    },
+    "tools/vendor/babel-standalone-8.0.7.LICENSE": {
+      "bytes": 1106,
+      "sha256": "117da2af0d4ce0fe1c8e19b5cff9dcd806adf973d328d27b11d4448c4ff24f76"
+    },
+    "tools/vendor/babel-standalone-8.0.7.package.json": {
+      "bytes": 6742,
+      "sha256": "fb7b35b3425212c861e9d86637adbc61934684e8465e5857fdf96b3677d030c6"
+    },
+    "tools/vendor/babel-standalone-8.0.7.provenance.json": {
+      "bytes": 1907,
+      "sha256": "b29e5f19de0c519f5c5cdc29d6da1e6ca927183a7487dd8570a8560b2e131d83"
     }
   }
 }
