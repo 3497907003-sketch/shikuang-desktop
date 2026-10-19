@@ -128,10 +128,17 @@ class FinishContract(unittest.TestCase):
 
 
 class HostLifecycleContract(unittest.TestCase):
-    def invoke(self, directory, *, phase='write', expect_write=False, stop_error=False, smoke_success=True):
+    def invoke(self, directory, *, phase='write', expect_write=False, stop_error=False, smoke_success=True,
+               platform_name=None):
         report = Path(directory) / (phase + '.json')
         calls = []
+        runtime_preparations = []
+        host_platform = platform_name or sys.platform
+        fixed_runtime = Path(directory) / 'synthetic-fixed-WebView2'
         parent = self
+        def prepare_runtime(root):
+            runtime_preparations.append(root)
+            return fixed_runtime
         class Lock:
             def __init__(self, path):
                 pass
@@ -169,6 +176,9 @@ class HostLifecycleContract(unittest.TestCase):
                 self.success = smoke_success
         def webview_start(**kwargs):
             calls.append('webview-start')
+            parent.assertEqual(kwargs['gui'], 'edgechromium' if host_platform == 'win32' else None)
+            if host_platform == 'win32':
+                parent.assertEqual(fake_webview.settings['WEBVIEW2_RUNTIME_PATH'], str(fixed_runtime))
             started = json.loads(Path(str(report) + '.host-start.json').read_text())
             parent.assertEqual(started['schema'], 'shikuang-smoke-host-start-v1')
             parent.assertEqual(started['origin'], Server.origin)
@@ -179,9 +189,14 @@ class HostLifecycleContract(unittest.TestCase):
         argv = ['--smoke-report', str(report), '--smoke-fixtures', str(Path(directory) / 'no-photos-opened'), '--smoke-phase', phase]
         if expect_write:
             argv += ['--smoke-run-id', RUN_ID, '--smoke-write-report', str(Path(directory) / 'write.json')]
+        # Isolate this module's platform selection, not global sys.platform:
+        # changing the latter also changes pathlib's concrete Path class.
+        host_sys = types.SimpleNamespace(platform=host_platform, executable=sys.executable, stderr=sys.stderr)
         with patch.dict(sys.modules, {'webview': fake_webview}), patch('desktop.smoke.Smoke', SyntheticSmoke), \
+                patch.object(run_app, 'sys', host_sys), \
                 patch.multiple(run_app, resource_root=lambda: Path(directory), verify_bundle=lambda root: MANIFEST,
                                InstanceLock=Lock, AssetServer=Server, require_writable=lambda path: None,
+                               prepare_fixed_runtime=prepare_runtime,
                                state_directory=lambda: Path(directory), persistent_profile=lambda: Path(directory)):
             if stop_error:
                 with self.assertRaisesRegex(run_app.DesktopError, 'cleanup failed'):
@@ -193,6 +208,7 @@ class HostLifecycleContract(unittest.TestCase):
         stopped = json.loads(Path(str(report) + '.host-stop.json').read_text())
         self.assertEqual(calls, ['lock-acquired', 'server-started', 'webview-start',
                                  'synthetic-smoke-callback', 'server-stopped', 'lock-closed'])
+        self.assertEqual(runtime_preparations, [Path(directory)] if host_platform == 'win32' else [])
         self.assertEqual(stopped['schema'], 'shikuang-smoke-host-stop-v1')
         self.assertEqual(stopped['exit_code'], code)
         self.assertEqual(stopped['server_stop_completed'], not stop_error)
@@ -203,7 +219,13 @@ class HostLifecycleContract(unittest.TestCase):
 
     def test_legacy_mac_cli_keeps_working_and_receipts_bracket_real_cleanup(self):
         with tempfile.TemporaryDirectory() as directory:
-            self.invoke(directory)
+            self.invoke(directory, platform_name='darwin')
+
+    def test_windows_lifecycle_injects_fixed_runtime_and_selects_edgechromium(self):
+        for options in ({}, {'smoke_success': False}, {'stop_error': True},
+                        {'phase': 'restart', 'expect_write': True}):
+            with self.subTest(options=options), tempfile.TemporaryDirectory() as directory:
+                self.invoke(directory, platform_name='win32', **options)
 
     def test_write_restart_share_run_id_but_use_fresh_host_launch_id(self):
         with tempfile.TemporaryDirectory() as directory:
