@@ -2,20 +2,69 @@
 from __future__ import annotations
 
 import base64
+import hashlib
 import json
 import platform
+import re
+import secrets
 import sys
 import threading
 import time
 from pathlib import Path
 
 
+def expected_write_snapshot(path: Path, manifest: dict, run_id: str, host: dict) -> dict:
+    """Read bounded prior smoke metadata, never a photo or user backup file."""
+    path = path.resolve()
+    if not path.is_file() or not 0 < path.stat().st_size <= 8 * 1024 * 1024:
+        raise ValueError('Write smoke report missing or larger than 8MiB')
+    with path.open('rb') as stream:
+        body = stream.read(8 * 1024 * 1024 + 1)
+    if len(body) > 8 * 1024 * 1024:
+        raise ValueError('Write smoke report grew beyond 8MiB')
+    report = json.loads(body.decode('utf-8-sig'))
+    if not isinstance(report, dict) or report.get('passed') is not True or report.get('phase') != 'write' or report.get('run_id') != run_id or report.get('errors') != []:
+        raise ValueError('Write smoke report is not a successful matching run')
+    for key in ('app_version', 'model_manifest_sha256', 'web_commit'):
+        if report.get(key) != manifest[key]:
+            raise ValueError('Write smoke report has another package identity: ' + key)
+    previous_host = report.get('host', {})
+    if (not isinstance(previous_host, dict) or previous_host.get('run_id') != run_id or previous_host.get('phase') != 'write'
+            or type(previous_host.get('pid')) is not int or previous_host['pid'] <= 0
+            or not isinstance(previous_host.get('launch_id'), str)
+            or not re.fullmatch(r'[a-f0-9]{32}', previous_host.get('launch_id', ''))
+            or previous_host['launch_id'] == host.get('launch_id')):
+        raise ValueError('Write report lacks a distinct process launch identity')
+    persistence = report.get('persistence', {})
+    if not isinstance(persistence, dict):
+        raise ValueError('Write report persistence must be an object')
+    snapshot = persistence.get('snapshot', {})
+    if (persistence.get('mode') != 'write-content-snapshot'
+            or not isinstance(snapshot, dict)
+            or snapshot.get('schema') != 'shikuang-persistence-snapshot-v1'
+            or snapshot.get('record_id') != 'desktop-runtime-smoke-record'
+            or type(snapshot.get('photo_count')) is not int or snapshot['photo_count'] != 1
+            or not isinstance(snapshot.get('search_fixture_query'), str)
+            or not snapshot['search_fixture_query'].startswith('desktop-smoke-')
+            or len(snapshot['search_fixture_query']) > 100):
+        raise ValueError('Write report lacks populated photo and search persistence')
+    for key in ('record_sha256', 'photos_sha256', 'search_sha256', 'search_raw_sha256'):
+        if not isinstance(snapshot.get(key), str) or not re.fullmatch(r'[a-f0-9]{64}', snapshot[key]):
+            raise ValueError('Write report persistence digest invalid: ' + key)
+    return {'snapshot': snapshot, 'report': {'path': str(path), 'bytes': len(body),
+            'sha256': hashlib.sha256(body).hexdigest()}}
+
+
 class Smoke:
-    def __init__(self, window, report: Path, fixtures: Path, phase: str, manifest: dict):
+    def __init__(self, window, report: Path, fixtures: Path, phase: str, manifest: dict,
+                 *, write_report: Path | None = None, run_id: str | None = None, host: dict | None = None):
         self.window = window
         self.report = report
         self.phase = phase
         self.manifest = manifest
+        self.run_id = run_id or secrets.token_hex(16)
+        self.host = dict(host or {})
+        self.expected_persistence = expected_write_snapshot(write_report, manifest, self.run_id, self.host) if write_report else None
         self.success = False
         self.finished = threading.Event()
         self.fixtures = {}
@@ -31,10 +80,19 @@ class Smoke:
         self.finished.set()
         if not isinstance(result, dict):
             result = {'passed': False, 'failure': 'Smoke callback returned no object'}
+        if result.get('passed') is True and result.get('errors') != []:
+            result.update(passed=False, failure='Smoke page errors cannot form a successful receipt')
+        if self.expected_persistence:
+            actual = result.get('persistence', {})
+            if (not isinstance(actual, dict) or actual.get('mode') != 'full-content-sha256-before-any-put'
+                    or actual.get('verified_before_any_put') is not True
+                    or actual.get('snapshot') != self.expected_persistence['snapshot']):
+                result.update(passed=False, failure='Full restart persistence receipt missing or changed')
         result.update({'platform': platform.platform(), 'architecture': platform.machine(),
             'app_version': self.manifest['app_version'], 'model_manifest_sha256': self.manifest['model_manifest_sha256'],
             'web_commit': self.manifest['web_commit'], 'phase': self.phase,
-            'accuracy_claim': False, 'physicalNetworkDisabled': False})
+            'accuracy_claim': False, 'physicalNetworkDisabled': False,
+            'run_id': self.run_id, 'host': self.host})
         self.success = result.get('passed') is True
         self.report.parent.mkdir(parents=True, exist_ok=True)
         completed = threading.Event()
@@ -128,7 +186,8 @@ class Smoke:
                 if not result.get('installed'):
                     raise RuntimeError(result.get('failure', 'External network blocking rule failed'))
                 blocked = True
-            args = json.dumps({'images': self.fixtures, 'phase': self.phase, 'externalHttpRuleInstalled': blocked}, ensure_ascii=False)
+            args = json.dumps({'images': self.fixtures, 'phase': self.phase, 'externalHttpRuleInstalled': blocked,
+                               'runId': self.run_id, 'expectedPersistence': self.expected_persistence}, ensure_ascii=False)
             self.window.evaluate_js('(' + SCRIPT + ')(' + args + ')', callback=self.finish)
             if not self.finished.wait(300):
                 self.finish({'passed': False, 'failure': 'Smoke exceeded 300 seconds'})
@@ -139,16 +198,27 @@ class Smoke:
 SCRIPT = r"""async function(input) {
  const report={passed:false,checks:[],errors:[],userAgent:navigator.userAgent,origin:location.origin,secureContext:isSecureContext,online:navigator.onLine,externalHttpRuleInstalled:input.externalHttpRuleInstalled};
  const check=(name,passed,details)=>{report.checks.push({name,passed,details});if(!passed)throw Error(name+': '+JSON.stringify(details));};
+ const id='desktop-runtime-smoke-record',strongRestart=input.phase==='restart'&&!!input.expectedPersistence;
+ report.persistence={mode:input.phase==='write'?'write-content-snapshot':strongRestart?'full-content-sha256-before-any-put':'legacy-id-only',verified_before_any_put:false};
+ const canonical=value=>JSON.stringify(value,(_key,item)=>{if(item&&typeof item==='object'&&!Array.isArray(item)){const sorted={};for(const key of Object.keys(item).sort())sorted[key]=item[key];return sorted;}return item;});
+ const digestText=async text=>Array.from(new Uint8Array(await crypto.subtle.digest('SHA-256',new TextEncoder().encode(text))),b=>b.toString(16).padStart(2,'0')).join('');
+ const digest=value=>digestText(canonical(value));
+ const snapshot=async()=>{const record=(await SpecimenStore.list()).find(r=>r.id===id);check('persistence-record-present',!!record,{});
+   check('persistence-photos-populated',Array.isArray(record.photos)&&record.photos.length===1&&record.photoCount===1,{});
+   const searches=SearchHistory.read(),query=record.sampleId;check('persistence-search-populated',typeof query==='string'&&query.startsWith('desktop-smoke-')&&searches.some(r=>r.kind==='records'&&r.query===query),{});
+   return {schema:'shikuang-persistence-snapshot-v1',record_id:id,record_sha256:await digest(record),photos_sha256:await digest(record.photos),photo_count:record.photos.length,search_sha256:await digest(searches),search_raw_sha256:await digestText(localStorage.getItem('shikuang-searches-v2')),search_fixture_query:query};};
  addEventListener('error',e=>report.errors.push(String(e.message)));
  addEventListener('unhandledrejection',e=>report.errors.push(String(e.reason)));
  try {
    check('original-stable-origin',location.origin==='http://127.0.0.1:8000',location.origin);
    check('secure-local-context',isSecureContext,{});
+   if(input.phase==='restart'){
+     if(strongRestart){const actual=await snapshot();check('history-survives-restart',canonical(actual)===canonical(input.expectedPersistence.snapshot),{mode:report.persistence.mode});report.persistence.snapshot=actual;report.persistence.expected_write_report=input.expectedPersistence.report;report.persistence.verified_before_any_put=true;}
+     else check('history-survives-restart',(await SpecimenStore.list()).some(r=>r.id===id),{mode:'legacy-id-only',fullContentVerified:false});
+   }
    if(input.externalHttpRuleInstalled){let reached=false;try{await fetch('https://example.com/',{signal:AbortSignal.timeout(3000)});reached=true;}catch(_){}check('external-http-blocked',!reached,{});}
    const contract=await MineralEngine.prepare();
    check('manifest-bound-models',MineralEngine.getModels(true).length===contract.modes.ensemble.length,{version:contract.version,labels:contract.labels.length,modelIds:contract.modes.ensemble});
-   const id='desktop-runtime-smoke-record';
-   if(input.phase==='restart')check('history-survives-restart',(await SpecimenStore.list()).some(r=>r.id===id),{});
    const controller=new AbortController();let cancelled=false,cancelStage='';
    const cancelDeadline=setTimeout(()=>{cancelStage='deadline';controller.abort();},30000);
    try{await MineralEngine.analyze([{src:input.images.quartz,crop:1}],{precision:false,signal:controller.signal,report:m=>{if(!controller.signal.aborted && /读取|输入筛查|分析图像/.test(m)){cancelStage=m;controller.abort();}}});}catch(e){cancelled=e.name==='AbortError';}finally{clearTimeout(cancelDeadline);}
@@ -185,14 +255,22 @@ SCRIPT = r"""async function(input) {
    const galleryAfter=await SpecimenStore.list();
    check('gallery-does-not-write-specimens',JSON.stringify(galleryBefore)===JSON.stringify(galleryAfter),{before:galleryBefore.length,after:galleryAfter.length});
    const recordsBefore=await SpecimenStore.list();
-   const record={...quartz,id,time:Date.now(),name:'桌面运行测试记录',scene:'lab',photos:[],photoCount:0,notes:'固定运行测试，非盲测'};
-   await SpecimenStore.put(record);
+   if(input.phase==='write'){
+     check('smoke-write-does-not-overwrite-existing-fixture',!recordsBefore.some(r=>r.id===id),{});
+     check('smoke-search-has-free-slot',SearchHistory.read().length<20,{count:SearchHistory.read().length});
+     check('smoke-photo-fits-record-storage',typeof input.images.quartz==='string'&&input.images.quartz.length<250000,{characters:input.images.quartz.length});
+     const record={...quartz,id,time:Date.now(),name:'桌面运行测试记录',scene:'lab',sampleId:'desktop-smoke-'+input.runId,photos:[input.images.quartz],photoCount:1,notes:'固定运行测试，非盲测'};
+     await SpecimenStore.put(record);SearchHistory.save(record.sampleId,'records');
+     await waitFor(()=>SearchHistory.read().some(r=>r.kind==='records'&&r.query===record.sampleId)&&String(localStorage.getItem('shikuang-searches-v2')).includes(record.sampleId),'saved smoke search');
+   }
+   // Restart never re-seeds: use the record read from storage for the backup.
+   const record=(await SpecimenStore.list()).find(r=>r.id===id);check('smoke-record-still-present',!!record,{});
    const backup=JSON.stringify({schema:'shikuang-records',version:2,records:[record]});
    const parsed=MineralCore.parseImport(backup);
    check('backup-retains-model-identity',parsed.length===1 && parsed[0].manifestSha256===quartz.manifestSha256,{count:parsed.length});
    const recordsAfter=await SpecimenStore.list();
    check('existing-records-retained',recordsBefore.every(r=>recordsAfter.some(x=>x.id===r.id)),{existingCount:recordsBefore.length});
-   if(input.phase==='restart'){await SpecimenStore.remove(id);check('smoke-record-cleanup',!(await SpecimenStore.list()).some(r=>r.id===id),{});}
+   if(input.phase==='restart'){await SpecimenStore.remove(id);check('smoke-record-cleanup',!(await SpecimenStore.list()).some(r=>r.id===id),{});if(record.sampleId&&record.sampleId.startsWith('desktop-smoke-')){const searches=SearchHistory.read().filter(r=>!(r.kind==='records'&&r.query===record.sampleId));localStorage.setItem('shikuang-searches-v2',JSON.stringify(searches));}}
    report.resources=performance.getEntriesByType('resource').map(r=>({name:r.name,duration:r.duration}));
    check('bundled-resources-only',report.resources.every(r=>r.name.startsWith(location.origin+'/')||r.name.startsWith('blob:')||r.name==='https://example.com/'),{});
    await openGallery();
@@ -202,6 +280,7 @@ SCRIPT = r"""async function(input) {
    // separately and must not hang package shutdown in that environment.
    report.galleryFrameSynchronized=false;
    await Promise.race([new Promise(r=>requestAnimationFrame(()=>requestAnimationFrame(()=>{report.galleryFrameSynchronized=true;r();}))),new Promise(r=>setTimeout(r,1000))]);
+   if(input.phase==='write')report.persistence.snapshot=await snapshot();
    report.passed=true;
  }catch(e){report.failure=String(e);}
  return report;
