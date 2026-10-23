@@ -60,6 +60,9 @@ def verify_committed_build(dist: Path, source_root: Path, web_commit: str) -> di
         if any(part.startswith('.') for part in Path(name).parts) or name.endswith(('.pt', '.pkl', '.safetensors')):
             raise ValueError('Unexpected asset: ' + name)
         names.append(name)
+    # Compare both inventories as POSIX paths. Path's component ordering puts
+    # research/ before research-input.js; string ordering does the reverse.
+    names.sort()
     tools = committed_build_tools(source_root, web_commit)
     build_inputs = {}
     # The canonical builder validates its complete asset/model/reference set.

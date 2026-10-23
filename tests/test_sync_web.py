@@ -50,6 +50,27 @@ for(const [name,raw] of inputs)fs.writeFileSync('dist/'+name,Buffer.concat([raw,
         self.assertEqual(set(identity), {'tools/build.cjs', 'tools/onnx-contract.cjs'})
         self.assertEqual(len(identity['tools/build.cjs']['sha256']), 64)
 
+    def test_directory_and_hyphenated_asset_share_a_prefix(self):
+        (self.repo / 'research').mkdir()
+        (self.repo / 'research/worker.js').write_text('fixture worker', encoding='utf-8')
+        (self.repo / 'research-input.js').write_text('fixture input', encoding='utf-8')
+        builder = self.repo / 'tools/build.cjs'
+        source = builder.read_text().replace("['index.html','core.js']",
+            "['index.html','core.js','research/worker.js','research-input.js']")
+        source = source.replace("for(const [name,raw] of inputs)fs.writeFileSync",
+            "fs.mkdirSync('dist/research',{recursive:true});\nfor(const [name,raw] of inputs)fs.writeFileSync")
+        builder.write_text(source, encoding='utf-8')
+        self.git('add', 'tools/build.cjs', 'research', 'research-input.js')
+        self.git('-c', 'user.name=Build fixture', '-c', 'user.email=fixture@example.invalid',
+                 'commit', '-qm', 'Nested and hyphenated build assets')
+        commit = self.git('rev-parse', 'HEAD').strip()
+        subprocess.run(['node', 'tools/build.cjs'], cwd=self.repo, check=True, capture_output=True)
+        shutil.rmtree(self.dist)
+        shutil.copytree(self.repo / 'dist', self.dist)
+        # pathlib sorts path components, while the reproduced inventory sorts
+        # POSIX strings. These are the same file set despite different orders.
+        verify_committed_build(self.dist, self.repo, commit)
+
     def test_tampered_rendered_asset_is_rejected(self):
         (self.dist / 'core.js').write_text('tampered', encoding='utf-8')
         with self.assertRaisesRegex(ValueError, 'Stale dist asset: core.js'):

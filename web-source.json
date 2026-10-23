@@ -1,21 +1,25 @@
 {
   "schema_version": 1,
   "app_version": "2.5.0-preview.1",
-  "web_commit": "6b3b881fe41d2a1e060d3f30238a6736afcb4c5b",
+  "web_commit": "406c3f9b7a7c9ac499b041ee224fd3b02933a870",
   "model_version": "inherited-2.0-audited",
   "model_manifest_sha256": "ddbe27e79489df0ff63647b37c17f701e458a59e076df14d47d93873085ae7fa",
   "web_build_inputs": {
     "tools/build.cjs": {
-      "bytes": 3710,
-      "sha256": "d064530073a8b8f53fb62efe5cbd66d8d8acca6dce419c38b1a60591456fd1be"
+      "bytes": 3819,
+      "sha256": "7f2ce14e063fdcbfda5874da0b636a6b708dc5725da9161ad3b5368867843905"
+    },
+    "tools/research-input-contract.cjs": {
+      "bytes": 1625,
+      "sha256": "35e2afcf4c76761c901e202e964a8eb82dd94f97c8f1d2ce2e6ab25332f90784"
     },
     "tools/onnx-contract.cjs": {
       "bytes": 3073,
       "sha256": "89b0c1ffa4ab9b4f892eb47b6aadc2fc59214839ab5e2c4dc0b0eee24b84b81f"
     },
     "tools/shell-release.cjs": {
-      "bytes": 3485,
-      "sha256": "8453ecf682681481438eef897777b37c606cfdcd4409aa6b840d0e555d404f60"
+      "bytes": 3986,
+      "sha256": "e5f0faeb9dc8fc60d191d3d43f965298bec3f771faea917f2319b153050acfee"
     },
     "tools/compat-js.cjs": {
       "bytes": 4369,
@@ -26,8 +30,8 @@
       "sha256": "eaafbc0f1b6133fe7f1e5f6bcfda158057fcfd46a075ca4aac64b822eaa8fd38"
     },
     "tools/build-inputs.json": {
-      "bytes": 371,
-      "sha256": "ca68da62640829cc98bda96a208bafe41a3cf739ee5620840b6d343efb92de7e"
+      "bytes": 410,
+      "sha256": "0a345bb4bafb7f1dd4d4e0e17c88a315ab11f60e448808c2476ec3f4474eaf63"
     },
     "tools/vendor/babel-standalone-8.0.7.cjs": {
       "bytes": 2342327,
