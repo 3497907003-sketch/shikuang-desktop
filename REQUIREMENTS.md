@@ -14,3 +14,6 @@ macOS 使用系统 WKWebView；Python 和模型/WASM 自包含。Windows 固定�
 
 发布验收：本机真实石英/狗照片，Worker 引擎与清单身份，资源无外部下载，断网重启、存储跨启动保留和旧历史迁移，取消后重试、完整资料库离线读取，备份导出/导入，窗口关闭清理，未知服务占端口/重复启动的错误路径。真实测试照片仅为运行烟测，不属于新的盲测数据。
 
+## 2026-10-28 桌面线程恢复资源复核
+
+已用既有同步程序固定Web提交6f65a0c84a22dc8630d6e0432ff69dde13f4245e重建并同步168项离线资源，本轮只读verify_bundle及逐文件canonical哈希复核通过。4个既有模型及模型清单SHA ddbe27e79489df0ff63647b37c17f701e458a59e076df14d47d93873085ae7fa保持；未运行真实模型、桌面GUI或新安装器，未推送或发布。Android／桌面本地资源证据见根work/android-idle-worker-source-sync-resume34-001/Root-safe-Android-Desktop-local-sync-summary.json。
