@@ -1,7 +1,7 @@
 {
   "schema_version": 1,
   "app_version": "2.5.0-preview.1",
-  "web_commit": "21b8af178f6b36289775150dc34f95539758dcca",
+  "web_commit": "92d774bc1f0d717fd19072c6473fc46010d03be6",
   "model_version": "inherited-2.0-audited",
   "model_manifest_sha256": "ddbe27e79489df0ff63647b37c17f701e458a59e076df14d47d93873085ae7fa",
   "web_build_inputs": {
