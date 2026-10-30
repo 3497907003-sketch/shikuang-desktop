@@ -2,7 +2,9 @@
 from __future__ import annotations
 
 import copy
+import contextlib
 import hashlib
+import io
 import json
 import os
 from pathlib import Path
@@ -16,7 +18,7 @@ import unittest
 from unittest.mock import patch
 
 from desktop import run_app
-from desktop.smoke import Smoke, expected_write_snapshot
+from desktop.smoke import Smoke, expected_write_snapshot, record_id, source_identity, private_backup_path, validate_private_backup, CONTRACT
 
 ROOT = Path(__file__).resolve().parents[1]
 RUN_ID = '01234567-89ab-cdef-0123-456789abcdef'
@@ -25,25 +27,48 @@ MANIFEST = {'app_version': '2.5-fixture', 'model_manifest_sha256': 'a' * 64,
 
 
 def write_document():
-    snapshot = {'schema': 'shikuang-persistence-snapshot-v1', 'record_id': 'desktop-runtime-smoke-record',
-                'photo_count': 1, 'search_fixture_query': 'desktop-smoke-' + RUN_ID,
-                **{key: 'c' * 64 for key in ('record_sha256', 'photos_sha256', 'search_sha256', 'search_raw_sha256')}}
+    baseline = synthetic_private_backup(None)['baseline']
+    snapshot = {'schema': 'shikuang-persistence-snapshot-v2', 'record_id': record_id(RUN_ID),
+                'photo_count': 1, 'sample_id': 'desktop-smoke-' + RUN_ID, 'baseline': baseline,
+                **{key: 'c' * 64 for key in ('record_sha256', 'photos_sha256')}}
     return {'passed': True, 'errors': [], 'phase': 'write', 'run_id': RUN_ID,
             **{key: MANIFEST[key] for key in ('app_version', 'model_manifest_sha256', 'web_commit')},
             'host': {'run_id': RUN_ID, 'phase': 'write', 'pid': 1234, 'launch_id': 'd' * 32},
+            'smoke_source_identity': source_identity(MANIFEST), 'baseline': baseline,
             'persistence': {'mode': 'write-content-snapshot', 'verified_before_any_put': False, 'snapshot': snapshot}}
+
+
+def synthetic_private_backup(path):
+    # Fixture text deliberately differs from Python's usual float formatting.
+    records = '[{"id":"old-fixed-id","photos":["SYNTHETIC-NOT-A-PHOTO"],"score":0.000001,"whole":1}]'
+    local = '[["other","KEEP"],["shikuang-searches-v2"," raw history "]]'
+    search = '" raw history "'
+    baseline = {'schema': 'shikuang-user-baseline-v2', 'record_count': 1,
+                'records_sha256': hashlib.sha256(records.encode()).hexdigest(),
+                'local_storage_sha256': hashlib.sha256(local.encode()).hexdigest(),
+                'search_raw_sha256': hashlib.sha256(search.encode()).hexdigest()}
+    return {'schema': CONTRACT + '-private-backup-v2', 'encoding': 'canonical-json-utf8-v1',
+            'run_id': RUN_ID, 'record_id': record_id(RUN_ID), 'source_identity': source_identity(MANIFEST),
+            'baseline': baseline, 'records': records, 'local_storage': local, 'search_raw': search}
 
 
 class PriorWriteContract(unittest.TestCase):
     def setUp(self):
         self.temp = tempfile.TemporaryDirectory(prefix='识矿-收据-')
-        self.path = Path(self.temp.name) / 'write report.json'
+        self.path = Path(self.temp.name).resolve() / 'write report.json'
         self.host = {'launch_id': 'e' * 32}
 
     def tearDown(self):
         self.temp.cleanup()
 
     def read(self, document):
+        private = private_backup_path(self.path, RUN_ID)
+        private.parent.mkdir(mode=0o700, exist_ok=True)
+        raw = json.dumps(synthetic_private_backup(private)).encode()
+        private.write_bytes(raw)
+        private.chmod(0o600)
+        if isinstance(document, dict):
+            document['private_backup'] = {'path': str(private), 'bytes': len(raw), 'sha256': hashlib.sha256(raw).hexdigest()}
         self.path.write_text(json.dumps(document, ensure_ascii=False), encoding='utf-8-sig')
         return expected_write_snapshot(self.path, MANIFEST, RUN_ID, self.host)
 
@@ -70,8 +95,8 @@ class PriorWriteContract(unittest.TestCase):
 
     def test_missing_populated_photo_search_or_malformed_snapshot_fails_closed(self):
         changes = {'schema': 'old', 'record_id': 'another-id', 'photo_count': 0,
-                   'search_fixture_query': 'ordinary-query', 'record_sha256': 'x' * 64,
-                   'photos_sha256': None, 'search_sha256': 123, 'search_raw_sha256': 'short'}
+                   'sample_id': 'ordinary-query', 'record_sha256': 'x' * 64,
+                   'photos_sha256': None}
         for key, value in changes.items():
             document = write_document()
             document['persistence']['snapshot'][key] = value
@@ -84,6 +109,45 @@ class PriorWriteContract(unittest.TestCase):
         document['persistence']['snapshot'] = []
         with self.assertRaises(ValueError):
             self.read(document)
+
+    def test_source_nonce_private_backup_and_baseline_are_bound(self):
+        for change in ('source', 'nonce', 'baseline'):
+            doc = write_document()
+            if change == 'source': doc['smoke_source_identity']['script_sha256'] = '0' * 64
+            if change == 'nonce': doc['persistence']['snapshot']['record_id'] = 'desktop-runtime-smoke-record'
+            if change == 'baseline': doc['baseline']['records_sha256'] = 'broken'
+            with self.subTest(change=change), self.assertRaises(ValueError): self.read(doc)
+        self.read(write_document())
+        private = private_backup_path(self.path, RUN_ID)
+        private.write_bytes(b'changed synthetic backup')
+        with self.assertRaisesRegex(ValueError, 'backup bytes changed'):
+            expected_write_snapshot(self.path, MANIFEST, RUN_ID, self.host)
+
+    def test_content_mismatch_with_recomputed_file_pin_still_refuses_restart(self):
+        changes = [lambda p:p.update(records=p['records'].replace('old-fixed-id', 'changed-id')),
+                   lambda p:p.update(local_storage=p['local_storage'].replace('KEEP', 'changed')),
+                   lambda p:p.update(local_storage=json.dumps(list(reversed(json.loads(p['local_storage']))))),
+                   lambda p:p.update(search_raw='"changed history"'),
+                   lambda p:p['baseline'].update(record_count=2)]
+        for change in changes:
+            self.read(write_document())
+            private = private_backup_path(self.path, RUN_ID)
+            payload = json.loads(private.read_bytes()); change(payload)
+            raw = json.dumps(payload).encode(); private.write_bytes(raw)
+            report = json.loads(self.path.read_text(encoding='utf-8-sig'))
+            report['private_backup'].update(bytes=len(raw), sha256=hashlib.sha256(raw).hexdigest())
+            self.path.write_text(json.dumps(report))
+            with self.subTest(change=change), self.assertRaises(ValueError):
+                expected_write_snapshot(self.path, MANIFEST, RUN_ID, self.host)
+
+    def test_validator_hashes_saved_JS_text_and_rejects_bad_shape_or_owned_id(self):
+        payload = synthetic_private_backup(None)
+        self.assertEqual(validate_private_backup(payload, MANIFEST, RUN_ID), payload['baseline'])
+        for key, value in [('records', '[null]'), ('records', json.dumps([{'id':record_id(RUN_ID)}])),
+                           ('local_storage', '[["x","1"],["x","2"]]')]:
+            altered = dict(payload, **{key:value})
+            with self.subTest(key=key,value=value), self.assertRaises(ValueError):
+                validate_private_backup(altered, MANIFEST, RUN_ID)
 
     def test_missing_or_oversized_report_is_not_read_as_backup(self):
         with self.assertRaises(ValueError):
@@ -99,6 +163,8 @@ class FinishContract(unittest.TestCase):
         smoke = Smoke.__new__(Smoke)  # Deliberately no fixture reads or renderer.
         smoke.finished = threading.Event()
         smoke.expected_persistence = expected
+        smoke.private_backup = None
+        smoke.baseline = None
         smoke.manifest = MANIFEST
         smoke.phase = 'restart'
         smoke.run_id = RUN_ID
@@ -112,6 +178,7 @@ class FinishContract(unittest.TestCase):
         expected = {'snapshot': write_document()['persistence']['snapshot']}
         valid = {'passed': True, 'errors': [], 'persistence': {
             'mode': 'full-content-sha256-before-any-put', 'verified_before_any_put': True,
+            'cleanup_verified': True,
             'snapshot': expected['snapshot']}}
         cases = [valid, dict(valid, errors=['late page error']), dict(valid, persistence=[]),
                  dict(valid, persistence={'mode': 'legacy-id-only'}), dict(valid, persistence={
@@ -127,7 +194,71 @@ class FinishContract(unittest.TestCase):
                 self.assertFalse(saved['accuracy_claim'])
 
 
+class PrivateBackupIOContract(unittest.TestCase):
+    def invoke(self, directory, collision=False, change_payload=None):
+        # Real backup IO uses only this temporary synthetic payload. No fixture
+        # constructor, AppKit, real WebView, photos or userdata is accessed.
+        smoke = Smoke.__new__(Smoke)
+        smoke.report = Path(directory).resolve() / 'write.json'
+        smoke.phase = 'write'; smoke.manifest = MANIFEST; smoke.run_id = RUN_ID
+        smoke.record_id = record_id(RUN_ID); smoke.expected_persistence = None
+        smoke.private_backup = None; smoke.baseline = None
+        smoke.fixtures = {'quartz': 'SYNTHETIC', 'dog': 'SYNTHETIC'}
+        smoke.finished = threading.Event(); captured = []
+        def finish(result): captured.append(result); smoke.finished.set()
+        smoke.finish = finish
+        class Window:
+            def evaluate_js(self, statement, callback=None):
+                if callback is None: return True
+                args = json.loads(statement.rsplit(')(', 1)[1][:-1])
+                if args['operation'] == 'backup':
+                    payload = synthetic_private_backup(smoke.report)
+                    if change_payload: change_payload(payload)
+                    callback(payload)
+                else:
+                    captured.append({'controls': args})
+                    callback({'passed': False, 'failure': 'synthetic-stop-before-any-inference'})
+        smoke.window = Window()
+        target = private_backup_path(smoke.report, RUN_ID)
+        if collision:
+            target.parent.mkdir(mode=0o700)
+            target.write_bytes(b'SYNTHETIC PRIOR BACKUP'); target.chmod(0o600)
+        with patch('desktop.smoke.sys', types.SimpleNamespace(platform='synthetic-no-WebView')):
+            smoke.run()
+        return smoke, target, captured
+
+    def test_private_backup_is_exclusive_owner_only_and_only_pin_enters_run(self):
+        with tempfile.TemporaryDirectory() as directory:
+            smoke, target, captured = self.invoke(directory)
+            self.assertEqual(target.stat().st_mode & 0o077, 0)
+            raw = target.read_bytes()
+            self.assertEqual(smoke.private_backup['sha256'], hashlib.sha256(raw).hexdigest())
+            controls = next(r['controls'] for r in captured if 'controls' in r)
+            self.assertNotIn('records', controls); self.assertNotIn('local_storage', controls)
+            self.assertEqual(controls['baseline'], write_document()['baseline'])
+
+    def test_existing_private_backup_is_not_overwritten_and_run_does_not_start(self):
+        with tempfile.TemporaryDirectory() as directory:
+            _, target, captured = self.invoke(directory, collision=True)
+            self.assertEqual(target.read_bytes(), b'SYNTHETIC PRIOR BACKUP')
+            self.assertFalse(any('controls' in r for r in captured))
+            self.assertFalse(captured[-1]['passed'])
+
+    def test_torn_payload_is_rejected_before_private_file_or_run(self):
+        with tempfile.TemporaryDirectory() as directory:
+            _, target, captured = self.invoke(directory, change_payload=lambda p:p.update(records=p['records'].replace('old-fixed-id','changed-id')))
+            self.assertFalse(target.exists()); self.assertFalse(any('controls' in r for r in captured))
+            self.assertFalse(captured[-1]['passed'])
+
+
 class HostLifecycleContract(unittest.TestCase):
+    def test_restart_requires_nonce_and_write_proof_before_any_runtime(self):
+        for extra in ([], ['--smoke-run-id', RUN_ID], ['--smoke-write-report', '/SYNTHETIC/write.json']):
+            with patch.object(run_app, 'resource_root') as root, contextlib.redirect_stderr(io.StringIO()):
+                with self.assertRaises(SystemExit) as error:
+                    run_app.main(['--smoke-report', '/SYNTHETIC/restart.json', '--smoke-phase', 'restart', *extra])
+                self.assertEqual(error.exception.code, 2); root.assert_not_called()
+
     def invoke(self, directory, *, phase='write', expect_write=False, stop_error=False, smoke_success=True,
                platform_name=None):
         report = Path(directory) / (phase + '.json')

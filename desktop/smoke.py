@@ -4,6 +4,7 @@ from __future__ import annotations
 import base64
 import hashlib
 import json
+import os
 import platform
 import re
 import secrets
@@ -12,9 +13,59 @@ import threading
 import time
 from pathlib import Path
 
+CONTRACT = 'shikuang-owned-nonce-proof-first-smoke-v2'
+PRIVATE_BACKUP_LIMIT = 128 * 1024 * 1024
+
+
+def record_id(run_id: str) -> str:
+    if not isinstance(run_id, str) or not re.fullmatch(r'[A-Fa-f0-9-]{16,64}', run_id):
+        raise ValueError('Smoke requires a bounded unique run nonce')
+    return 'desktop-runtime-smoke-' + run_id
+
+
+def source_identity(manifest: dict) -> dict:
+    return {'contract': CONTRACT, 'script_sha256': hashlib.sha256(SCRIPT.encode()).hexdigest(),
+            **{key: manifest[key] for key in ('app_version', 'model_manifest_sha256', 'web_commit')}}
+
+
+def private_backup_path(report: Path, run_id: str) -> Path:
+    return report.parent / 'private-backup' / (record_id(run_id) + '.json')
+
+
+def validate_private_backup(payload: dict, manifest: dict, run_id: str) -> dict:
+    """Bind saved canonical UTF-8 JSON text to its baseline without reserializing
+    JS numbers in Python. This validates only local private backup content.
+    """
+    keys = {'schema', 'encoding', 'run_id', 'record_id', 'source_identity', 'baseline',
+            'records', 'local_storage', 'search_raw'}
+    if (not isinstance(payload, dict) or set(payload) != keys
+            or payload['schema'] != CONTRACT + '-private-backup-v2'
+            or payload['encoding'] != 'canonical-json-utf8-v1'
+            or payload['run_id'] != run_id or payload['record_id'] != record_id(run_id)
+            or payload['source_identity'] != source_identity(manifest)
+            or any(not isinstance(payload[key], str) for key in ('records', 'local_storage', 'search_raw'))):
+        raise ValueError('Private backup nonce/SOURCE/encoding mismatch')
+    records = json.loads(payload['records'])
+    local = json.loads(payload['local_storage'])
+    search = json.loads(payload['search_raw'])
+    if (not isinstance(records, list) or any(not isinstance(row, dict) or row.get('id') == record_id(run_id) for row in records)
+            or not isinstance(local, list) or any(not isinstance(row, list) or len(row) != 2
+                or not isinstance(row[0], str) or (row[1] is not None and not isinstance(row[1], str)) for row in local)):
+        raise ValueError('Private backup record/local-storage structure mismatch')
+    names = [row[0] for row in local]
+    if (len(names) != len(set(names)) or names != sorted(names, key=lambda value: value.encode('utf-16-be', 'surrogatepass'))
+            or search != dict(local).get('shikuang-searches-v2')):
+        raise ValueError('Private backup local-storage/search binding mismatch')
+    baseline = {'schema': 'shikuang-user-baseline-v2', 'record_count': len(records),
+                **{key + '_sha256': hashlib.sha256(payload[field].encode('utf-8')).hexdigest()
+                   for key, field in (('records', 'records'), ('local_storage', 'local_storage'), ('search_raw', 'search_raw'))}}
+    if payload['baseline'] != baseline:
+        raise ValueError('Private backup content digest does not match baseline')
+    return baseline
+
 
 def expected_write_snapshot(path: Path, manifest: dict, run_id: str, host: dict) -> dict:
-    """Read bounded prior smoke metadata, never a photo or user backup file."""
+    """Verify prior proof and bounded local private backup without logging payload."""
     path = path.resolve()
     if not path.is_file() or not 0 < path.stat().st_size <= 8 * 1024 * 1024:
         raise ValueError('Write smoke report missing or larger than 8MiB')
@@ -28,6 +79,8 @@ def expected_write_snapshot(path: Path, manifest: dict, run_id: str, host: dict)
     for key in ('app_version', 'model_manifest_sha256', 'web_commit'):
         if report.get(key) != manifest[key]:
             raise ValueError('Write smoke report has another package identity: ' + key)
+    if report.get('smoke_source_identity') != source_identity(manifest):
+        raise ValueError('Write report has another smoke SOURCE identity')
     previous_host = report.get('host', {})
     if (not isinstance(previous_host, dict) or previous_host.get('run_id') != run_id or previous_host.get('phase') != 'write'
             or type(previous_host.get('pid')) is not int or previous_host['pid'] <= 0
@@ -41,17 +94,33 @@ def expected_write_snapshot(path: Path, manifest: dict, run_id: str, host: dict)
     snapshot = persistence.get('snapshot', {})
     if (persistence.get('mode') != 'write-content-snapshot'
             or not isinstance(snapshot, dict)
-            or snapshot.get('schema') != 'shikuang-persistence-snapshot-v1'
-            or snapshot.get('record_id') != 'desktop-runtime-smoke-record'
+            or snapshot.get('schema') != 'shikuang-persistence-snapshot-v2'
+            or snapshot.get('record_id') != record_id(run_id)
             or type(snapshot.get('photo_count')) is not int or snapshot['photo_count'] != 1
-            or not isinstance(snapshot.get('search_fixture_query'), str)
-            or not snapshot['search_fixture_query'].startswith('desktop-smoke-')
-            or len(snapshot['search_fixture_query']) > 100):
-        raise ValueError('Write report lacks populated photo and search persistence')
-    for key in ('record_sha256', 'photos_sha256', 'search_sha256', 'search_raw_sha256'):
+            or snapshot.get('sample_id') != 'desktop-smoke-' + run_id):
+        raise ValueError('Write report lacks owned nonce/photo persistence')
+    for key in ('record_sha256', 'photos_sha256'):
         if not isinstance(snapshot.get(key), str) or not re.fullmatch(r'[a-f0-9]{64}', snapshot[key]):
             raise ValueError('Write report persistence digest invalid: ' + key)
-    return {'snapshot': snapshot, 'report': {'path': str(path), 'bytes': len(body),
+    baseline = report.get('baseline')
+    backup = report.get('private_backup')
+    expected_path = private_backup_path(path, run_id)
+    if (not isinstance(backup, dict) or set(backup) != {'path', 'bytes', 'sha256'}
+            or backup['path'] != str(expected_path) or type(backup['bytes']) is not int
+            or not 0 < backup['bytes'] <= PRIVATE_BACKUP_LIMIT
+            or expected_path.is_symlink() or expected_path.resolve() != expected_path
+            or (os.name != 'nt' and expected_path.stat().st_mode & 0o077)):
+        raise ValueError('Owned private backup proof missing or unsafe')
+    with expected_path.open('rb') as stream:
+        private = stream.read(PRIVATE_BACKUP_LIMIT + 1)
+    if len(private) != backup['bytes'] or hashlib.sha256(private).hexdigest() != backup['sha256']:
+        raise ValueError('Owned private backup bytes changed')
+    saved_baseline = validate_private_backup(json.loads(private), manifest, run_id)
+    if (not isinstance(baseline, dict) or saved_baseline != baseline
+            or snapshot.get('baseline') != baseline):
+        raise ValueError('Owned baseline/backup/SOURCE proof mismatch')
+    return {'snapshot': snapshot, 'baseline': baseline, 'private_backup': backup,
+            'source_identity': source_identity(manifest), 'report': {'path': str(path), 'bytes': len(body),
             'sha256': hashlib.sha256(body).hexdigest()}}
 
 
@@ -63,8 +132,13 @@ class Smoke:
         self.phase = phase
         self.manifest = manifest
         self.run_id = run_id or secrets.token_hex(16)
+        self.record_id = record_id(self.run_id)
         self.host = dict(host or {})
+        if phase == 'restart' and write_report is None:
+            raise ValueError('Restart requires this run nonce and matching write proof')
         self.expected_persistence = expected_write_snapshot(write_report, manifest, self.run_id, self.host) if write_report else None
+        self.private_backup = self.expected_persistence['private_backup'] if self.expected_persistence else None
+        self.baseline = self.expected_persistence['baseline'] if self.expected_persistence else None
         self.success = False
         self.finished = threading.Event()
         self.fixtures = {}
@@ -86,13 +160,15 @@ class Smoke:
             actual = result.get('persistence', {})
             if (not isinstance(actual, dict) or actual.get('mode') != 'full-content-sha256-before-any-put'
                     or actual.get('verified_before_any_put') is not True
+                    or actual.get('cleanup_verified') is not True
                     or actual.get('snapshot') != self.expected_persistence['snapshot']):
                 result.update(passed=False, failure='Full restart persistence receipt missing or changed')
         result.update({'platform': platform.platform(), 'architecture': platform.machine(),
             'app_version': self.manifest['app_version'], 'model_manifest_sha256': self.manifest['model_manifest_sha256'],
             'web_commit': self.manifest['web_commit'], 'phase': self.phase,
             'accuracy_claim': False, 'physicalNetworkDisabled': False,
-            'run_id': self.run_id, 'host': self.host})
+            'run_id': self.run_id, 'host': self.host, 'smoke_source_identity': source_identity(self.manifest),
+            'private_backup': self.private_backup, 'baseline': self.baseline})
         self.success = result.get('passed') is True
         self.report.parent.mkdir(parents=True, exist_ok=True)
         completed = threading.Event()
@@ -186,8 +262,38 @@ class Smoke:
                 if not result.get('installed'):
                     raise RuntimeError(result.get('failure', 'External network blocking rule failed'))
                 blocked = True
-            args = json.dumps({'images': self.fixtures, 'phase': self.phase, 'externalHttpRuleInstalled': blocked,
-                               'runId': self.run_id, 'expectedPersistence': self.expected_persistence}, ensure_ascii=False)
+            controls = {'phase': self.phase, 'externalHttpRuleInstalled': blocked,
+                        'runId': self.run_id, 'recordId': self.record_id,
+                        'sourceIdentity': source_identity(self.manifest)}
+            if self.phase == 'write':
+                backup_ready = threading.Event()
+                backup_status = {}
+                def backup_received(payload):
+                    try:
+                        baseline = validate_private_backup(payload, self.manifest, self.run_id)
+                        raw = (json.dumps(payload, ensure_ascii=False, separators=(',', ':')) + '\n').encode()
+                        if len(raw) > PRIVATE_BACKUP_LIMIT:
+                            raise ValueError('Private baseline exceeds 128MiB; no smoke record was written')
+                        target = private_backup_path(self.report, self.run_id)
+                        target.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
+                        if target.parent.is_symlink() or (os.name != 'nt' and target.parent.stat().st_mode & 0o077):
+                            raise ValueError('Private backup directory must be owner-only')
+                        fd = os.open(target, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+                        with os.fdopen(fd, 'wb') as stream:
+                            stream.write(raw); stream.flush(); os.fsync(stream.fileno())
+                        self.private_backup = {'path': str(target), 'bytes': len(raw), 'sha256': hashlib.sha256(raw).hexdigest()}
+                        self.baseline = baseline
+                        backup_status['ok'] = True
+                    except Exception as error:
+                        backup_status['error'] = str(error)
+                    finally:
+                        backup_ready.set()
+                self.window.evaluate_js('(' + SCRIPT + ')(' + json.dumps(dict(controls, operation='backup')) + ')', callback=backup_received)
+                if not backup_ready.wait(30) or not backup_status.get('ok'):
+                    raise RuntimeError(backup_status.get('error', 'Private baseline backup exceeded 30 seconds'))
+            args = json.dumps(dict(controls, operation='run', images=self.fixtures,
+                              expectedPersistence=self.expected_persistence, privateBackup=self.private_backup,
+                              baseline=self.baseline), ensure_ascii=False)
             self.window.evaluate_js('(' + SCRIPT + ')(' + args + ')', callback=self.finish)
             if not self.finished.wait(300):
                 self.finish({'passed': False, 'failure': 'Smoke exceeded 300 seconds'})
@@ -198,23 +304,40 @@ class Smoke:
 SCRIPT = r"""async function(input) {
  const report={passed:false,checks:[],errors:[],userAgent:navigator.userAgent,origin:location.origin,secureContext:isSecureContext,online:navigator.onLine,externalHttpRuleInstalled:input.externalHttpRuleInstalled};
  const check=(name,passed,details)=>{report.checks.push({name,passed,details});if(!passed)throw Error(name+': '+JSON.stringify(details));};
- const id='desktop-runtime-smoke-record',strongRestart=input.phase==='restart'&&!!input.expectedPersistence;
- report.persistence={mode:input.phase==='write'?'write-content-snapshot':strongRestart?'full-content-sha256-before-any-put':'legacy-id-only',verified_before_any_put:false};
+ const id='desktop-runtime-smoke-'+input.runId,strongRestart=input.phase==='restart'&&!!input.expectedPersistence;
+ report.persistence={mode:input.phase==='write'?'write-content-snapshot':'full-content-sha256-before-any-put',verified_before_any_put:false};
  const canonical=value=>JSON.stringify(value,(_key,item)=>{if(item&&typeof item==='object'&&!Array.isArray(item)){const sorted={};for(const key of Object.keys(item).sort())sorted[key]=item[key];return sorted;}return item;});
  const digestText=async text=>Array.from(new Uint8Array(await crypto.subtle.digest('SHA-256',new TextEncoder().encode(text))),b=>b.toString(16).padStart(2,'0')).join('');
  const digest=value=>digestText(canonical(value));
- const snapshot=async()=>{const record=(await SpecimenStore.list()).find(r=>r.id===id);check('persistence-record-present',!!record,{});
+ const localSnapshot=()=>Array.from({length:localStorage.length},(_,i)=>localStorage.key(i)).sort().map(key=>[key,localStorage.getItem(key)]);
+ const capture=async()=>({records:await SpecimenStore.list(),local_storage:localSnapshot()});
+ const encodedCapture=async captured=>{const records=captured.records.filter(r=>r.id!==id),local=captured.local_storage;
+   const recordText=canonical(records),localText=canonical(local),searchText=canonical(local.find(row=>row[0]==='shikuang-searches-v2')?.[1]??null);
+   return {encoding:'canonical-json-utf8-v1',records:recordText,local_storage:localText,search_raw:searchText,baseline:{schema:'shikuang-user-baseline-v2',record_count:records.length,records_sha256:await digestText(recordText),local_storage_sha256:await digestText(localText),search_raw_sha256:await digestText(searchText)}};};
+ const baseline=async()=> (await encodedCapture(await capture())).baseline;
+ const snapshot=async()=>{const captured=await capture(),record=captured.records.find(r=>r.id===id);check('persistence-record-present',!!record,{});
    check('persistence-photos-populated',Array.isArray(record.photos)&&record.photos.length===1&&record.photoCount===1,{});
-   const searches=SearchHistory.read(),query=record.sampleId;check('persistence-search-populated',typeof query==='string'&&query.startsWith('desktop-smoke-')&&searches.some(r=>r.kind==='records'&&r.query===query),{});
-   return {schema:'shikuang-persistence-snapshot-v1',record_id:id,record_sha256:await digest(record),photos_sha256:await digest(record.photos),photo_count:record.photos.length,search_sha256:await digest(searches),search_raw_sha256:await digestText(localStorage.getItem('shikuang-searches-v2')),search_fixture_query:query};};
+   check('persistence-owned-nonce',record.sampleId==='desktop-smoke-'+input.runId,{});
+   return {schema:'shikuang-persistence-snapshot-v2',record_id:id,record_sha256:await digest(record),photos_sha256:await digest(record.photos),photo_count:record.photos.length,sample_id:record.sampleId,baseline:(await encodedCapture(captured)).baseline};};
  addEventListener('error',e=>report.errors.push(String(e.message)));
  addEventListener('unhandledrejection',e=>report.errors.push(String(e.reason)));
  try {
+   check('exact-owned-nonce',typeof input.runId==='string'&&/^[A-Fa-f0-9-]{16,64}$/.test(input.runId)&&input.recordId===id,{});
+   check('exact-smoke-source',input.sourceIdentity&&input.sourceIdentity.contract==='shikuang-owned-nonce-proof-first-smoke-v2'&&/^[a-f0-9]{64}$/.test(input.sourceIdentity.script_sha256),{});
    check('original-stable-origin',location.origin==='http://127.0.0.1:8000',location.origin);
    check('secure-local-context',isSecureContext,{});
+   if(input.operation==='backup'){
+     check('backup-write-phase',input.phase==='write',{});
+     const captured=await capture();check('nonce-id-is-fresh',!captured.records.some(r=>r.id===id),{});
+     return {schema:'shikuang-owned-nonce-proof-first-smoke-v2-private-backup-v2',run_id:input.runId,record_id:id,source_identity:input.sourceIdentity,...await encodedCapture(captured)};
+   }
+   check('private-backup-proof-present',input.privateBackup&&Number.isSafeInteger(input.privateBackup.bytes)&&input.privateBackup.bytes>0&&/^[a-f0-9]{64}$/.test(input.privateBackup.sha256)&&input.baseline&&input.baseline.schema==='shikuang-user-baseline-v2',{});
+   check('all-existing-records-and-local-storage-unchanged-before-actions',canonical(await baseline())===canonical(input.baseline),{});
    if(input.phase==='restart'){
-     if(strongRestart){const actual=await snapshot();check('history-survives-restart',canonical(actual)===canonical(input.expectedPersistence.snapshot),{mode:report.persistence.mode});report.persistence.snapshot=actual;report.persistence.expected_write_report=input.expectedPersistence.report;report.persistence.verified_before_any_put=true;}
-     else check('history-survives-restart',(await SpecimenStore.list()).some(r=>r.id===id),{mode:'legacy-id-only',fullContentVerified:false});
+     check('matching-restart-proof-required',strongRestart&&canonical(input.expectedPersistence.source_identity)===canonical(input.sourceIdentity)&&canonical(input.expectedPersistence.private_backup)===canonical(input.privateBackup)&&canonical(input.expectedPersistence.baseline)===canonical(input.baseline),{});
+     const actual=await snapshot();check('history-survives-restart',canonical(actual)===canonical(input.expectedPersistence.snapshot),{mode:report.persistence.mode});report.persistence.snapshot=actual;report.persistence.expected_write_report=input.expectedPersistence.report;report.persistence.verified_before_any_put=true;
+   }else{
+     check('write-nonce-absent-before-actions',input.phase==='write'&&!(await SpecimenStore.list()).some(r=>r.id===id),{});
    }
    if(input.externalHttpRuleInstalled){let reached=false;try{await fetch('https://example.com/',{signal:AbortSignal.timeout(3000)});reached=true;}catch(_){}check('external-http-blocked',!reached,{});}
    const contract=await MineralEngine.prepare();
@@ -257,11 +380,10 @@ SCRIPT = r"""async function(input) {
    const recordsBefore=await SpecimenStore.list();
    if(input.phase==='write'){
      check('smoke-write-does-not-overwrite-existing-fixture',!recordsBefore.some(r=>r.id===id),{});
-     check('smoke-search-has-free-slot',SearchHistory.read().length<20,{count:SearchHistory.read().length});
      check('smoke-photo-fits-record-storage',typeof input.images.quartz==='string'&&input.images.quartz.length<250000,{characters:input.images.quartz.length});
+     check('existing-content-unchanged-before-owned-put',canonical(await baseline())===canonical(input.baseline),{});
      const record={...quartz,id,time:Date.now(),name:'桌面运行测试记录',scene:'lab',sampleId:'desktop-smoke-'+input.runId,photos:[input.images.quartz],photoCount:1,notes:'固定运行测试，非盲测'};
-     await SpecimenStore.put(record);SearchHistory.save(record.sampleId,'records');
-     await waitFor(()=>SearchHistory.read().some(r=>r.kind==='records'&&r.query===record.sampleId)&&String(localStorage.getItem('shikuang-searches-v2')).includes(record.sampleId),'saved smoke search');
+     await SpecimenStore.put(record);
    }
    // Restart never re-seeds: use the record read from storage for the backup.
    const record=(await SpecimenStore.list()).find(r=>r.id===id);check('smoke-record-still-present',!!record,{});
@@ -269,8 +391,12 @@ SCRIPT = r"""async function(input) {
    const parsed=MineralCore.parseImport(backup);
    check('backup-retains-model-identity',parsed.length===1 && parsed[0].manifestSha256===quartz.manifestSha256,{count:parsed.length});
    const recordsAfter=await SpecimenStore.list();
-   check('existing-records-retained',recordsBefore.every(r=>recordsAfter.some(x=>x.id===r.id)),{existingCount:recordsBefore.length});
-   if(input.phase==='restart'){await SpecimenStore.remove(id);check('smoke-record-cleanup',!(await SpecimenStore.list()).some(r=>r.id===id),{});if(record.sampleId&&record.sampleId.startsWith('desktop-smoke-')){const searches=SearchHistory.read().filter(r=>!(r.kind==='records'&&r.query===record.sampleId));localStorage.setItem('shikuang-searches-v2',JSON.stringify(searches));}}
+   check('existing-records-retained',canonical(await baseline())===canonical(input.baseline),{existingCount:input.baseline.record_count,fullContentVerified:true});
+   if(input.phase==='restart'){
+     check('owned-content-proof-before-cleanup',record.id===id&&record.sampleId==='desktop-smoke-'+input.runId&&canonical(await snapshot())===canonical(input.expectedPersistence.snapshot),{});
+     await SpecimenStore.remove(id);check('smoke-record-cleanup',!(await SpecimenStore.list()).some(r=>r.id===id),{});
+     check('all-existing-content-restored-after-own-delete',canonical(await baseline())===canonical(input.baseline),{});report.persistence.cleanup_verified=true;
+   }
    report.resources=performance.getEntriesByType('resource').map(r=>({name:r.name,duration:r.duration}));
    check('bundled-resources-only',report.resources.every(r=>r.name.startsWith(location.origin+'/')||r.name.startsWith('blob:')||r.name==='https://example.com/'),{});
    await openGallery();
@@ -280,6 +406,7 @@ SCRIPT = r"""async function(input) {
    // separately and must not hang package shutdown in that environment.
    report.galleryFrameSynchronized=false;
    await Promise.race([new Promise(r=>requestAnimationFrame(()=>requestAnimationFrame(()=>{report.galleryFrameSynchronized=true;r();}))),new Promise(r=>setTimeout(r,1000))]);
+   check('all-existing-content-exact-at-completion',canonical(await baseline())===canonical(input.baseline),{});
    if(input.phase==='write')report.persistence.snapshot=await snapshot();
    report.passed=true;
  }catch(e){report.failure=String(e);}

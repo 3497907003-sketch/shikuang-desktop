@@ -58,6 +58,8 @@ def main(argv=None) -> int:
         parser.error('--smoke-run-id requires --smoke-report and a bounded hex/GUID identity')
     if args.smoke_write_report and (not args.smoke_report or args.smoke_phase != 'restart'):
         parser.error('--smoke-write-report requires --smoke-report --smoke-phase restart')
+    if args.smoke_report and args.smoke_phase == 'restart' and (not args.smoke_write_report or not args.smoke_run_id):
+        parser.error('restart requires --smoke-run-id and the matching --smoke-write-report; no legacy cleanup')
     if args.smoke_report:
         args.smoke_report = args.smoke_report.resolve()
     if args.smoke_fixtures:
