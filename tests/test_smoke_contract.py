@@ -227,10 +227,17 @@ class PrivateBackupIOContract(unittest.TestCase):
             smoke.run()
         return smoke, target, captured
 
-    def test_private_backup_is_exclusive_owner_only_and_only_pin_enters_run(self):
+    def test_private_backup_is_exclusive_platform_permissions_and_only_pin_enters_run(self):
         with tempfile.TemporaryDirectory() as directory:
             smoke, target, captured = self.invoke(directory)
-            self.assertEqual(target.stat().st_mode & 0o077, 0)
+            # Windows stat exposes DOS read/write attributes, not POSIX ACLs.
+            # Match the production platform guard; do not pretend 0600 proves
+            # Windows owner-only access. Exclusive creation and content proof
+            # remain required on both platforms (including the collision test).
+            if os.name != 'nt':
+                self.assertEqual(target.stat().st_mode & 0o077, 0)
+            self.assertTrue(target.is_file())
+            self.assertFalse(target.is_symlink())
             raw = target.read_bytes()
             self.assertEqual(smoke.private_backup['sha256'], hashlib.sha256(raw).hexdigest())
             controls = next(r['controls'] for r in captured if 'controls' in r)

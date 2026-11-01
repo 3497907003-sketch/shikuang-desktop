@@ -97,7 +97,7 @@ function Require-SameIdentity($Actual, $Expected) {
     }
 }
 
-function Require-RuntimeReport($Result, [string]$Phase, $Started, $Identity) {
+function Require-RuntimeReport($Result, [string]$Phase, $Started, $Identity, [string]$ReportPath, [string]$HostStartPath) {
     Require ($Result.passed -is [bool] -and $Result.passed -eq $true -and $Result.errors -is [array] -and $Result.errors.Count -eq 0) 'Runtime failed or lacks error evidence'
     Require ($Result.run_id -ceq $RunId -and $Result.phase -ceq $Phase) 'Runtime report belongs to another run or phase'
     Require-SameIdentity $Result.host $Started
@@ -106,40 +106,23 @@ function Require-RuntimeReport($Result, [string]$Phase, $Started, $Identity) {
     Require ($Result.online -is [bool] -and $Result.online -eq $false -and $Result.secureContext -is [bool] -and
         $Result.secureContext -eq $true -and $Result.accuracy_claim -is [bool] -and $Result.accuracy_claim -eq $false -and
         $Result.origin -ceq 'http://127.0.0.1:8000') 'Offline/origin/accuracy boundary failed'
-    $Names = @()
-    Require ($Result.checks -is [array] -and $Result.checks.Count -gt 0) 'Missing runtime checks'
-    foreach ($Check in $Result.checks) {
-        Require ($Check.name -is [string] -and $Check.name.Length -gt 0 -and $Names -cnotcontains $Check.name -and
-            $Check.passed -is [bool] -and $Check.passed -eq $true) 'Missing, duplicate or failed runtime check'
-        $Names += $Check.name
-    }
-    $Required = @('original-stable-origin', 'secure-local-context', 'manifest-bound-models', 'cancel-active-worker',
-        'real-quartz-recognition', 'real-dog-rejection', 'complete-local-reference-library', 'full-117-photo-manifest',
-        'quartz-three-native-gallery-decodes', 'gallery-does-not-write-specimens', 'backup-retains-model-identity',
-        'existing-records-retained', 'bundled-resources-only')
-    if ($Phase -ceq 'restart') { $Required += @('history-survives-restart', 'smoke-record-cleanup') }
-    foreach ($Name in $Required) { Require ($Names -ccontains $Name) ('Missing real runtime gate: ' + $Name) }
-    $Persistence = $Result.persistence
-    $Snapshot = $Persistence.snapshot
-    Require ($Snapshot.schema -ceq 'shikuang-persistence-snapshot-v1' -and $Snapshot.record_id -ceq 'desktop-runtime-smoke-record' -and
-        ($Snapshot.photo_count -is [int] -or $Snapshot.photo_count -is [long]) -and $Snapshot.photo_count -eq 1 -and
-        $Snapshot.search_fixture_query -is [string] -and $Snapshot.search_fixture_query.Length -gt 0) 'Missing saved record/photo/search content contract'
-    foreach ($Field in @('record_sha256', 'photos_sha256', 'search_sha256', 'search_raw_sha256')) {
-        Require ($Snapshot.$Field -is [string] -and $Snapshot.$Field -cmatch '^[a-f0-9]{64}$') ('Invalid persistence digest: ' + $Field)
-    }
-    if ($Phase -ceq 'write') {
-        Require ($Persistence.mode -ceq 'write-content-snapshot') 'Missing full write persistence snapshot'
-    } else {
-        Require ($Persistence.mode -ceq 'full-content-sha256-before-any-put' -and $Persistence.verified_before_any_put -is [bool] -and
-            $Persistence.verified_before_any_put -eq $true -and $null -ne $WriteSnapshot) 'Restart did not verify content before writing'
-        foreach ($Field in @('schema', 'record_id', 'record_sha256', 'photos_sha256', 'photo_count', 'search_sha256', 'search_raw_sha256', 'search_fixture_query')) {
-            Require ([string]$Snapshot.$Field -ceq [string]$WriteSnapshot.$Field) ('Restart persistence content mismatch: ' + $Field)
-        }
-        $Expected = $Persistence.expected_write_report
-        Require ($Expected.path -is [string] -and [string]::Equals([IO.Path]::GetFullPath($Expected.path), $WriteReportPath, [StringComparison]::OrdinalIgnoreCase) -and
-            ($Expected.bytes -is [int] -or $Expected.bytes -is [long]) -and $Expected.bytes -eq (Get-Item -LiteralPath $WriteReportPath).Length -and
-            $Expected.sha256 -is [string] -and $Expected.sha256 -ceq (Get-FileHash -LiteralPath $WriteReportPath -Algorithm SHA256).Hash.ToLowerInvariant()) 'Restart did not read this exact write report'
-    }
+    # The native smoke now uses its own nonce, full image/record SHA and private
+    # baseline backup (v2), rather than a global fixed record/search fixture.
+    # Validate the exact phase-specific check sequence: the snapshot triplet is
+    # required twice at its two restart positions, not accepted as arbitrary
+    # duplicate checks. The live process/port/offline gates stay in this script.
+    $BeforeSHA = (Get-FileHash -LiteralPath $ReportPath -Algorithm SHA256).Hash.ToLowerInvariant()
+    $Verifier = Join-Path $Root 'tools/verify_native_smoke_report.py'
+    $Arguments = @($Verifier, '--report', $ReportPath, '--phase', $Phase,
+        '--host-start', $HostStartPath, '--identity', (Join-Path $Root 'web-source.json'), '--run-id', $RunId)
+    if ($Phase -ceq 'restart') { $Arguments += @('--write-report', $WriteReportPath) }
+    $VerifiedJson = & python @Arguments
+    Require ($LASTEXITCODE -eq 0) 'Current native v2 content/backup/SOURCE verification failed'
+    $Verified = ($VerifiedJson -join "`n") | ConvertFrom-Json -Depth 40
+    Require ($Verified.run_id -ceq $RunId -and $Verified.phase -ceq $Phase -and
+        $Verified.host_launch_id -ceq $Started.launch_id -and $Verified.report.sha256 -ceq $BeforeSHA -and
+        $BeforeSHA -ceq (Get-FileHash -LiteralPath $ReportPath -Algorithm SHA256).Hash.ToLowerInvariant()) 'Native content verifier did not bind these exact report bytes'
+    $PhaseReceipt.native_content_contract = $Verified
 }
 
 Write-Json $ReceiptPath $Receipt
@@ -248,7 +231,7 @@ try {
         $PhaseReceipt.network_after = Get-NetworkSnapshot
         Require-Offline $PhaseReceipt.network_after
         $Result = Read-Json $Report
-        Require-RuntimeReport $Result $Phase $Started $Identity
+        Require-RuntimeReport $Result $Phase $Started $Identity $Report $StartPath
         if ($Phase -ceq 'write') { $WriteSnapshot = $Result.persistence.snapshot }
         $PhaseReceipt.python_report_sha256 = (Get-FileHash -LiteralPath $Report -Algorithm SHA256).Hash.ToLowerInvariant()
         # Established field, now backed by this run's actual host observations.
