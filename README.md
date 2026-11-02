@@ -35,10 +35,10 @@ python -m PyInstaller --noconfirm Shikuang.spec
 
 实际相机权限、系统文件选择与保存窗口、各实验室实体设备、Windows 10/11 和 Intel Mac 的交互需要分别验证。不得把自动化识别检查当成人工操作验证或准确率验收。
 
-## Windows 草稿上传校验
+## Windows 开发包核验与发布边界
 
-`.github/workflows/draft-upload.yml` 只提供手动调度，不自动运行或公开发布。输入已经成功的 `desktop.yml` run、实际构建的桌面提交和预览 tag；当前仅接受经过验证的 `3f94d9a` 完整提交及 `v2.5.0-preview.1`。上传器自身的提交不冒充安装包的构建提交。
+当前开发包身份以 `web-source.json`、模型和资源 manifest 为准：canonical 构建含 168 项离线资产、4 个继承模型（3 个分类器与 1 个输入筛查）及 190 条已审书籍来源表述。`.github/workflows/draft-upload.yml` 与 `tools/verify_windows_delivery.py` 仍固定旧来源合同，不能用于当前开发包；本轮未修改或运行该发布门。
 
-流程重新核验 Actions 外包摘要、安装包 SHA256/CRC/x64 PE、固定 WebView2 的全部 256 个文件、同一网页提交的 157 个资产，以及两个真实断网进程的矿物/非矿物、取消、图库、历史重启与本地资源证据。Windows 运行证据来自 Windows Server 2022 x64，未包含原生截图，不代表人工拍照、文件保存面板或实体 Windows 10/11 测试，也不是 Kappa 结果。上传仅增加 Windows ZIP、Windows 校验和与 gate 报告；同 tag 的公开 release、错误目标、不同已有 Windows 文件均会被拒绝，macOS 文件不会删除或覆盖。
+现有开发 ZIP 已核验完整 SHA256/CRC、x64 PE、168 项 Web payload 与固定 WebView2 的全部 256 文件 seal。此处记录开发包静态身份与完整性证据；既有 Windows Server 2022 x64 VM 断网和重启烟测保持原范围，不代表安装器、实体 Windows 10/11、相机或保存对话框、识别准确率及独立 Kappa 验收。
 
-GitHub 要求手动调度 workflow 已存在于默认分支。首次使用前需完成该流程文件的代码审查与合入；运行流程仍按输入的固定构建提交核验，而不是重新打包当前分支。
+正式发布仍须新权重独立验收、实体设备验证，以及绑定当前精确来源和已审产物的发布门；本段不构成上传或发布授权。已封存开发 ZIP 保持原样，工作树中的说明修订不会自动进入既有包。
