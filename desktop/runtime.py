@@ -196,26 +196,35 @@ class AssetServer(ThreadingHTTPServer):
                 'modelManifestSha256': manifest['model_manifest_sha256'], 'webCommit': manifest['web_commit'],
                 'origin': self.origin,
             }, ensure_ascii=False))
-        except (OSError, KeyError):
+        except BaseException as error:
+            # The caller cannot retain this server if construction fails after
+            # binding. Close our listener even for decoding/allocation failures.
             self.server_close()
-            raise DesktopError('桌面启动组件缺失，请重新安装完整包。')
+            if isinstance(error, (OSError, UnicodeError, KeyError)):
+                raise DesktopError('桌面启动组件缺失，请重新安装完整包。') from error
+            raise
 
     def start(self, timeout: float = 5):
-        self.thread = threading.Thread(target=self.serve_forever, kwargs={'poll_interval': 0.1}, name='shikuang-assets', daemon=True)
-        self.thread.start()
-        opener = build_opener(ProxyHandler({}))  # Never route local health via a system proxy.
-        deadline = time.monotonic() + timeout
-        while time.monotonic() < deadline:
-            try:
-                with opener.open(Request(self.origin + HEALTH_PATH, headers={'Cache-Control': 'no-store'}), timeout=0.5) as response:
-                    data = json.loads(response.read(1024))
-                if data.get('nonce') == self.nonce and data.get('version') == self.manifest['app_version']:
-                    return self
-                raise DesktopError('本机服务身份校验失败。请关闭识矿后重试。')
-            except (URLError, TimeoutError, socket.timeout):
-                time.sleep(0.03)
-        self.stop()
-        raise DesktopError('识矿本机服务未能在 5 秒内就绪。请检查系统权限后重试。')
+        try:
+            self.thread = threading.Thread(target=self.serve_forever, kwargs={'poll_interval': 0.1}, name='shikuang-assets', daemon=True)
+            self.thread.start()
+            opener = build_opener(ProxyHandler({}))  # Never route local health via a system proxy.
+            deadline = time.monotonic() + timeout
+            while time.monotonic() < deadline:
+                try:
+                    with opener.open(Request(self.origin + HEALTH_PATH, headers={'Cache-Control': 'no-store'}), timeout=0.5) as response:
+                        data = json.loads(response.read(1024))
+                    if data.get('nonce') == self.nonce and data.get('version') == self.manifest['app_version']:
+                        return self
+                    raise DesktopError('本机服务身份校验失败。请关闭识矿后重试。')
+                except (URLError, TimeoutError, socket.timeout):
+                    time.sleep(0.03)
+            raise DesktopError('识矿本机服务未能在 5 秒内就绪。请检查系统权限后重试。')
+        except BaseException:
+            # Callers cannot retain the server from AssetServer(...).start()
+            # when startup raises. Release our socket on every failure path.
+            self.stop()
+            raise
 
     def server_bind(self):
         if sys.platform == 'win32':
@@ -223,10 +232,10 @@ class AssetServer(ThreadingHTTPServer):
         super().server_bind()
 
     def stop(self):
-        if self.thread:
+        if self.thread and self.thread.is_alive():
             self.shutdown()
             self.thread.join(timeout=2)
-            self.thread = None
+        self.thread = None
         self.server_close()
 
 
@@ -266,23 +275,34 @@ class AssetHandler(BaseHTTPRequestHandler):
         if name not in self.server.manifest['files']:
             self.send_error(404, 'Not Found')
             return
+        response_started = False
         try:
             file = safe_path(self.server.root, name)
             if name == 'index.html':
                 data = file.read_bytes().replace(b'<head>', b'<head><script src="/__shikuang_desktop__.js"></script>', 1)
+                response_started = True
                 self.payload(data, 'text/html; charset=utf-8', head)
             else:
                 types = {'.wasm': 'application/wasm', '.mjs': 'text/javascript', '.js': 'text/javascript', '.json': 'application/json', '.onnx': 'application/octet-stream'}
                 media = types.get(file.suffix) or mimetypes.guess_type(file.name)[0] or 'application/octet-stream'
-                self.headers_for(200, file.stat().st_size, media)
-                if not head:
-                    with file.open('rb') as stream:
+                # Open before sending success: resources can disappear after
+                # startup verification, for example during quarantine/removal.
+                with file.open('rb') as stream:
+                    length = os.fstat(stream.fileno()).st_size
+                    response_started = True
+                    self.headers_for(200, length, media)
+                    if not head:
                         for block in iter(lambda: stream.read(1024 * 1024), b''):
                             self.wfile.write(block)
         except (OSError, DesktopError):
-            if not self.wfile.closed:
-                # Browser/worker gets an explicit resource failure, never substitute HTML.
-                self.close_connection = True
+            self.close_connection = True
+            if not response_started and not self.wfile.closed:
+                # A missing allowlisted asset must reach the loader as an HTTP
+                # failure, rather than a connection with no response/status.
+                try:
+                    self.send_error(503, 'Resource Unavailable')
+                except OSError:
+                    pass  # The client disconnected; do not write a second response.
 
     def headers_for(self, status: int, length: int, media: str):
         self.send_response(status)

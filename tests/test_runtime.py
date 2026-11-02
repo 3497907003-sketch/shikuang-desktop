@@ -96,6 +96,74 @@ class RuntimeTests(unittest.TestCase):
         InstanceLock(path).acquire().close()
         self.assertTrue(path.exists())
 
+    def test_missing_allowlisted_asset_returns_http_error_and_server_recovers(self):
+        self.start()
+        asset = self.root / 'web/vendor/test.wasm'
+        asset.unlink()
+        for method in ('GET', 'HEAD'):
+            status, _, body = self.request('/vendor/test.wasm', method=method)
+            self.assertEqual(status, 503)
+            if method == 'HEAD':
+                self.assertEqual(body, b'')
+        asset.write_bytes(b'wasm-resource')
+        self.assertEqual(self.request('/vendor/test.wasm')[2], b'wasm-resource')
+
+    def test_thread_start_failure_releases_owned_port(self):
+        server = AssetServer(self.root, self.manifest, port=0)
+        port = server.server_address[1]
+        try:
+            with patch('desktop.runtime.threading.Thread.start', side_effect=RuntimeError('thread unavailable')):
+                with self.assertRaisesRegex(RuntimeError, 'thread unavailable'):
+                    server.start()
+            with socket.socket() as replacement:
+                replacement.bind(('127.0.0.1', port))
+        finally:
+            # Also cleans the pre-fix server without shutdown on an unstarted thread.
+            server.server_close()
+
+    def test_thread_construction_failure_releases_owned_port(self):
+        server = AssetServer(self.root, self.manifest, port=0)
+        port = server.server_address[1]
+        try:
+            with patch('desktop.runtime.threading.Thread', side_effect=RuntimeError('allocation unavailable')):
+                with self.assertRaisesRegex(RuntimeError, 'allocation unavailable'):
+                    server.start()
+            with socket.socket() as replacement:
+                replacement.bind(('127.0.0.1', port))
+        finally:
+            server.server_close()
+
+    def test_invalid_bridge_encoding_releases_port_and_reports_component_error(self):
+        (self.root / 'desktop/bridge.js').write_bytes(b'\xff')
+        server = AssetServer.__new__(AssetServer)
+        try:
+            with self.assertRaisesRegex(DesktopError, '启动组件缺失'):
+                server.__init__(self.root, self.manifest, port=0)
+            with socket.socket() as replacement:
+                replacement.bind(('127.0.0.1', server.server_address[1]))
+        finally:
+            server.server_close()
+
+    def test_unexpected_bridge_failure_releases_port_and_preserves_exception(self):
+        server = AssetServer.__new__(AssetServer)
+        failure = MemoryError('bridge allocation unavailable')
+        try:
+            with patch('desktop.runtime.Path.read_text', side_effect=failure):
+                with self.assertRaises(MemoryError) as raised:
+                    server.__init__(self.root, self.manifest, port=0)
+            self.assertIs(raised.exception, failure)
+            with socket.socket() as replacement:
+                replacement.bind(('127.0.0.1', server.server_address[1]))
+        finally:
+            server.server_close()
+
+    def test_opened_asset_stat_failure_still_returns_http_error(self):
+        self.start()
+        with patch('desktop.runtime.os.fstat', side_effect=OSError('file unavailable')):
+            for method in ('GET', 'HEAD'):
+                self.assertEqual(self.request('/vendor/test.wasm', method=method)[0], 503)
+        self.assertEqual(self.request('/vendor/test.wasm')[2], b'wasm-resource')
+
     def test_path_and_asset_identity_fail_closed(self):
         outside = self.root / 'secret'; outside.write_bytes(b'secret')
         (self.root / 'web/linked').symlink_to(outside)
