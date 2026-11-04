@@ -113,9 +113,9 @@ def validate_backup(report: dict, write_path: Path, identity: dict, run_id: str)
     return baseline
 
 
-def validate_content(report: dict, phase: str, started: dict, identity: dict,
-                     run_id: str, report_path: Path, write_path: Path | None = None) -> dict:
-    """Validate native content only; live OS/network evidence stays with caller."""
+def validate_public_content(report: dict, phase: str, started: dict, identity: dict,
+                            run_id: str) -> dict:
+    """Shared public report rules; private-backup verification stays with CI."""
     owned = record_id(run_id)
     require(report.get('passed') is True and report.get('errors') == [] and
             not report.get('failure'), 'Native phase did not complete successfully')
@@ -184,6 +184,16 @@ def validate_content(report: dict, phase: str, started: dict, identity: dict,
                  (report['externalHttpRuleInstalled'] and r['name'] == 'https://example.com/')) for r in resources),
             'Unexpected external resource or missing resource evidence')
     require(type(report.get('galleryFrameSynchronized')) is bool, 'Missing native frame synchronization observation')
+    return {'record_id': owned, 'check_count': len(rows)}
+
+
+def validate_content(report: dict, phase: str, started: dict, identity: dict,
+                     run_id: str, report_path: Path, write_path: Path | None = None) -> dict:
+    """Validate native content only; live OS/network evidence stays with caller."""
+    validated = validate_public_content(report, phase, started, identity, run_id)
+    owned = validated['record_id']
+    rows = report['checks']
+    checks = {row['name']: row['details'] for row in rows}
     actual_write = report_path if phase == 'write' else write_path
     require(actual_write is not None and (phase == 'write' or actual_write.resolve() != report_path.resolve()),
             'Restart requires a separate matching write report')

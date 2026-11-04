@@ -1,5 +1,6 @@
 """Delivery guard fixtures are metadata/bytes, not model training samples."""
 import copy
+import hashlib
 import importlib.util
 import io
 import json
@@ -15,9 +16,40 @@ SPEC = importlib.util.spec_from_file_location('delivery', ROOT / 'tools/verify_w
 d = importlib.util.module_from_spec(SPEC)
 SPEC.loader.exec_module(d)
 
+# These identities describe temporary synthetic fixtures only. Tests never read
+# a real release, staged model, production resource seal, or current build pin.
+SYNTHETIC_SOURCE = 'a' * 40
+SYNTHETIC_WEB_SOURCE = 'b' * 40
+SYNTHETIC_VERSION = '2.5.0-preview.999'
+SYNTHETIC_TAG = 'v' + SYNTHETIC_VERSION
+SYNTHETIC_IDENTITY = {
+    'schema_version': 1, 'app_version': SYNTHETIC_VERSION,
+    'web_commit': SYNTHETIC_WEB_SOURCE, 'model_version': 'synthetic-test-model',
+    'model_manifest_sha256': '2' * 64, 'web_build_inputs': {},
+}
+
+
+def json_bytes(value):
+    return (json.dumps(value, sort_keys=True) + '\n').encode('utf-8')
+
+
+def sha256(raw):
+    return hashlib.sha256(raw).hexdigest()
+
+
+def evidence():
+    return {
+        'schema_version': 1, 'repository': d.REPOSITORY, 'run_id': 42,
+        'run_attempt': 2, 'source_commit': SYNTHETIC_SOURCE,
+        'web_commit': SYNTHETIC_WEB_SOURCE, 'app_version': SYNTHETIC_VERSION,
+        'tag': SYNTHETIC_TAG,
+        'artifact': {'id': 12, 'size_in_bytes': 100, 'digest': 'sha256:' + '1' * 64},
+        'asset_index_sha256': '3' * 64,
+    }
+
 
 def runtime(phase='write'):
-    identity = json.loads((ROOT / 'web-source.json').read_text())
+    identity = copy.deepcopy(SYNTHETIC_IDENTITY)
     details = {
         'original-stable-origin': d.ORIGIN,
         'manifest-bound-models': {'version': identity['model_version'], 'labels': 98,
@@ -32,8 +64,8 @@ def runtime(phase='write'):
         'gallery-does-not-write-specimens': {'before': 1, 'after': 1},
         'backup-retains-model-identity': {'count': 1},
     }
-    names = d.CHECKS | ({'history-survives-restart', 'smoke-record-cleanup'} if phase == 'restart' else set())
-    return {'passed': True, 'errors': [], 'phase': phase, 'web_commit': d.WEB_SOURCE,
+    names = d.v2.native.expected_names(phase, False)
+    return {'passed': True, 'errors': [], 'phase': phase, 'web_commit': identity['web_commit'],
             'model_manifest_sha256': identity['model_manifest_sha256'], 'app_version': identity['app_version'],
             'architecture': 'AMD64', 'platform': 'Windows-10-10.0.20348-SP0',
             'physicalNetworkDisabled': True, 'online': False, 'accuracy_claim': False,
@@ -41,57 +73,68 @@ def runtime(phase='write'):
             'quartz': {'key': 'quartz', 'engine': 'onnx-worker-wasm', 'modelVersion': identity['model_version'],
                        'manifestSha256': identity['model_manifest_sha256'], 'modelCount': 3, 'score': .5},
             'resources': [{'name': d.ORIGIN + '/model-manifest.json'}],
-            'checks': [{'name': name, 'passed': True, 'details': details.get(name, {})} for name in sorted(names)]}
+            'externalHttpRuleInstalled': False,
+            'checks': [{'name': name, 'passed': True, 'details': details.get(name, {})} for name in names]}
 
 
 class DeliveryGuards(unittest.TestCase):
     def setUp(self):
+        self.evidence = evidence()
         self.run = {'id': 42, 'repository': {'full_name': d.REPOSITORY},
-                    'head_repository': {'full_name': d.REPOSITORY}, 'head_sha': d.TESTED_SOURCE,
+                    'run_attempt': 2,
+                    'head_repository': {'full_name': d.REPOSITORY}, 'head_sha': SYNTHETIC_SOURCE,
                     'path': '.github/workflows/desktop.yml', 'status': 'completed',
                     'conclusion': 'success', 'event': 'push'}
-        self.release = {'id': 1, 'tag_name': d.TAG, 'target_commitish': d.TESTED_SOURCE,
+        self.release = {'id': 1, 'tag_name': SYNTHETIC_TAG, 'target_commitish': SYNTHETIC_SOURCE,
                         'draft': True, 'prerelease': True, 'assets': [{'name': 'mac.zip', 'id': 99}]}
-        self.identity = json.loads((ROOT / 'web-source.json').read_text())
+        self.identity = copy.deepcopy(SYNTHETIC_IDENTITY)
 
     def test_actual_source_guards_reject_success_from_another_head_or_workflow(self):
-        d.validate_run(self.run, d.REPOSITORY, d.TESTED_SOURCE)
+        d.validate_run(self.run, self.evidence)
+        d.validate_run(dict(self.run, event='workflow_dispatch'), self.evidence)
         for field, value in [('head_sha', '0' * 40), ('path', '.github/workflows/fake.yml'),
-                             ('conclusion', 'failure'), ('event', 'pull_request')]:
+                             ('conclusion', 'failure'), ('event', 'pull_request'),
+                             ('id', 43), ('run_attempt', 1), ('id', '42'),
+                             ('run_attempt', '2'), ('status', 'in_progress')]:
             with self.subTest(field=field), self.assertRaises(ValueError):
-                d.validate_run(dict(self.run, **{field: value}), d.REPOSITORY, d.TESTED_SOURCE)
-        fork = copy.deepcopy(self.run)
-        fork['head_repository']['full_name'] = 'unknown/fork'
-        with self.assertRaises(ValueError):
-            d.validate_run(fork, d.REPOSITORY, d.TESTED_SOURCE)
+                d.validate_run(dict(self.run, **{field: value}), self.evidence)
+        for field in ('repository', 'head_repository'):
+            fork = copy.deepcopy(self.run)
+            fork[field]['full_name'] = 'unknown/fork'
+            with self.subTest(field=field), self.assertRaises(ValueError):
+                d.validate_run(fork, self.evidence)
 
     def test_artifact_unique_unexpired_and_same_run(self):
         a = {'name': d.ARTIFACT_NAME, 'id': 12, 'expired': False, 'size_in_bytes': 100,
-             'digest': 'sha256:' + '1' * 64, 'workflow_run': {'id': 42, 'head_sha': d.TESTED_SOURCE}}
-        self.assertEqual(d.select_artifact([a], 42, d.TESTED_SOURCE), a)
-        for rows in ([a, a], [dict(a, expired=True)], [dict(a, digest='')],
-                     [dict(a, workflow_run={'id': 43, 'head_sha': d.TESTED_SOURCE})]):
+             'digest': 'sha256:' + '1' * 64, 'workflow_run': {'id': 42, 'head_sha': SYNTHETIC_SOURCE}}
+        self.assertEqual(d.select_artifact([a], self.evidence), a)
+        for rows in ([], [a, a], [dict(a, expired=True)], [dict(a, digest='')],
+                     [dict(a, id=13)], [dict(a, size_in_bytes=101)],
+                     [dict(a, id='12')], [dict(a, size_in_bytes=100.0)],
+                     [dict(a, digest='sha256:' + '4' * 64)],
+                     [dict(a, workflow_run={'id': 43, 'head_sha': SYNTHETIC_SOURCE})],
+                     [dict(a, workflow_run={'id': 42, 'head_sha': 'c' * 40})]):
             with self.subTest(rows=rows), self.assertRaises(ValueError):
-                d.select_artifact(rows, 42, d.TESTED_SOURCE)
+                d.select_artifact(rows, self.evidence)
 
     def test_public_wrong_target_or_non_preview_release_is_never_modified(self):
-        d.validate_release(self.release, d.TAG, d.TESTED_SOURCE)
+        d.validate_release(self.release, SYNTHETIC_TAG, SYNTHETIC_SOURCE)
         for field, value in [('draft', False), ('prerelease', False), ('target_commitish', 'main')]:
             with self.subTest(field=field), self.assertRaises(ValueError):
-                d.validate_release(dict(self.release, **{field: value}), d.TAG, d.TESTED_SOURCE)
+                d.validate_release(dict(self.release, **{field: value}), SYNTHETIC_TAG, SYNTHETIC_SOURCE)
 
     def test_draft_lookup_enumerates_releases_not_by_tag_endpoint(self):
         with patch.object(d, 'api', return_value=[self.release]) as api:
-            self.assertEqual(d.matching_release(d.REPOSITORY, d.TAG)['id'], 1)
+            self.assertEqual(d.matching_release(d.REPOSITORY, SYNTHETIC_TAG)['id'], 1)
             self.assertIn('releases?per_page=100', api.call_args.args[0])
 
     def test_annotated_tag_dereferences_to_tested_commit(self):
         with patch.object(d, 'api', side_effect=[{'object': {'type': 'tag', 'sha': 'a' * 40}},
-                                               {'object': {'type': 'commit', 'sha': d.TESTED_SOURCE}}]):
-            d.validate_tag(d.REPOSITORY, d.TAG, d.TESTED_SOURCE)
+                                               {'object': {'type': 'commit', 'sha': SYNTHETIC_SOURCE}}]):
+            d.validate_tag(d.REPOSITORY, SYNTHETIC_TAG, SYNTHETIC_SOURCE)
         with patch.object(d, 'api', return_value={'object': {'type': 'commit', 'sha': '0' * 40}}):
             with self.assertRaises(ValueError):
-                d.validate_tag(d.REPOSITORY, d.TAG, d.TESTED_SOURCE)
+                d.validate_tag(d.REPOSITORY, SYNTHETIC_TAG, SYNTHETIC_SOURCE)
 
     def test_runtime_both_phases_require_actual_offline_history_and_model_gates(self):
         for phase in ('write', 'restart'):
@@ -187,6 +230,181 @@ class DeliveryGuards(unittest.TestCase):
         for text in ('sha256:' + 'a' * 64, 'Hash : short', 'Hash : ' + 'a' * 64 + '\nHash : ' + 'b' * 64):
             with self.subTest(text=text), self.assertRaises(ValueError):
                 d.checksum_from_text(text)
+
+
+class ReviewedEvidenceFixtures(unittest.TestCase):
+    def checked(self, value):
+        raw = json_bytes(value)
+        return d.checked_evidence(raw, sha256(raw))
+
+    def test_complete_synthetic_evidence_requires_its_exact_byte_digest(self):
+        value = evidence()
+        raw = json_bytes(value)
+        self.assertEqual(d.checked_evidence(raw, sha256(raw)), value)
+        for body, expected in ((raw, '0' * 64), (raw + b' ', sha256(raw)),
+                               (raw, ''), (b'', sha256(b'')),
+                               (b' ' * 65537, sha256(b' ' * 65537))):
+            with self.subTest(size=len(body), expected=expected), self.assertRaises(ValueError):
+                d.checked_evidence(body, expected)
+
+    def test_evidence_root_and_artifact_fields_are_closed(self):
+        original = evidence()
+        for field in original:
+            missing = copy.deepcopy(original)
+            del missing[field]
+            with self.subTest(missing=field), self.assertRaises(ValueError):
+                self.checked(missing)
+        for value in (dict(original, unreviewed=True),
+                      dict(original, artifact=dict(original['artifact'], run_id=42)),
+                      dict(original, artifact={'id': 12, 'digest': 'sha256:' + '1' * 64})):
+            with self.subTest(value=value), self.assertRaises(ValueError):
+                self.checked(value)
+        raw = json_bytes(original).rstrip()[:-1] + b', "run_id": 42}\n'
+        with self.assertRaises(ValueError):
+            d.checked_evidence(raw, sha256(raw))
+        raw = json_bytes(original).replace(b'"id": 12', b'"id": 12, "id": 12')
+        with self.assertRaises(ValueError):
+            d.checked_evidence(raw, sha256(raw))
+
+    def test_evidence_numbers_are_positive_integers_not_booleans_or_strings(self):
+        for field in ('run_id', 'run_attempt'):
+            for value in (True, False, '42', 42.0, 0, -1):
+                with self.subTest(field=field, value=value), self.assertRaises(ValueError):
+                    self.checked(dict(evidence(), **{field: value}))
+        for field in ('id', 'size_in_bytes'):
+            for value in (True, False, '12', 12.0, 0, -1):
+                changed = evidence()
+                changed['artifact'][field] = value
+                with self.subTest(field=field, value=value), self.assertRaises(ValueError):
+                    self.checked(changed)
+        for value in (dict(evidence(), schema_version=True),
+                      dict(evidence(), artifact=dict(evidence()['artifact'], size_in_bytes=d.MAX_FILE))):
+            with self.subTest(value=value), self.assertRaises(ValueError):
+                self.checked(value)
+
+    def test_candidate_repository_commits_tag_and_asset_index_are_immutable(self):
+        for field, value in (('repository', 'unknown/fork'), ('source_commit', 'main'),
+                             ('web_commit', 'b' * 39), ('app_version', '../../package'),
+                             ('tag', 'v2.5.0-preview.998'), ('asset_index_sha256', 'short')):
+            with self.subTest(field=field), self.assertRaises(ValueError):
+                self.checked(dict(evidence(), **{field: value}))
+        changed = evidence()
+        changed['artifact']['digest'] = '1' * 64
+        with self.assertRaises(ValueError):
+            self.checked(changed)
+
+    def test_context_cannot_swap_the_approved_attempt_or_artifact(self):
+        candidate = evidence()
+        raw = json_bytes(candidate)
+        run = {'id': 42, 'run_attempt': 2,
+               'repository': {'full_name': d.REPOSITORY},
+               'head_repository': {'full_name': d.REPOSITORY},
+               'head_sha': SYNTHETIC_SOURCE, 'path': '.github/workflows/desktop.yml',
+               'status': 'completed', 'conclusion': 'success', 'event': 'workflow_dispatch'}
+        artifact = {'name': d.ARTIFACT_NAME, 'expired': False,
+                    **candidate['artifact'],
+                    'workflow_run': {'id': 42, 'head_sha': SYNTHETIC_SOURCE}}
+        context = {'schema_version': 2, 'evidence_json': raw.decode('utf-8'),
+                   'run': run, 'artifact': artifact}
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / 'synthetic-context.json'
+            path.write_bytes(json_bytes(context))
+            self.assertEqual(d.load_context(path, sha256(raw))['run_attempt'], 2)
+            changed = copy.deepcopy(context)
+            changed['run']['run_attempt'] = 3
+            path.write_bytes(json_bytes(changed))
+            with self.assertRaises(ValueError):
+                d.load_context(path, sha256(raw))
+            changed = copy.deepcopy(context)
+            changed['artifact']['digest'] = 'sha256:' + '9' * 64
+            path.write_bytes(json_bytes(changed))
+            with self.assertRaises(ValueError):
+                d.load_context(path, sha256(raw))
+            path.write_bytes(json_bytes(context))
+            with self.assertRaises(ValueError):
+                d.load_context(path, '0' * 64)
+
+
+class CompleteWebAssetFixtures(unittest.TestCase):
+    PREFIX = 'Shikuang/_internal/web/'
+
+    def synthetic_build(self, count=168):
+        temporary = tempfile.TemporaryDirectory()
+        self.addCleanup(temporary.cleanup)
+        dist = Path(temporary.name) / 'dist'
+        payload = {f'assets/synthetic-{i:03}.txt': f'fixture-{i:03}'.encode('ascii')
+                   for i in range(count)}
+        for name, body in payload.items():
+            path = dist / name
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_bytes(body)
+        files = {name: {'bytes': len(body), 'sha256': sha256(body)}
+                 for name, body in payload.items()}
+        seal = json_bytes({**copy.deepcopy(SYNTHETIC_IDENTITY), 'files': files})
+        return dist, payload, seal
+
+    def verify(self, dist, payload, seal, approved_sha=None):
+        stream = io.BytesIO()
+        with zipfile.ZipFile(stream, 'w') as archive:
+            archive.writestr(self.PREFIX + '.web-assets.json', seal)
+            for name, body in payload.items():
+                archive.writestr(self.PREFIX + name, body)
+        stream.seek(0)
+        with zipfile.ZipFile(stream) as archive:
+            d.inspect_zip(archive)
+            return d.verify_web_assets(archive, self.PREFIX, dist,
+                                       SYNTHETIC_IDENTITY, approved_sha or sha256(seal))
+
+    def test_complete_157_and_168_file_builds_use_exact_index_not_fixed_count(self):
+        for count in (157, 168):
+            with self.subTest(count=count):
+                dist, payload, seal = self.synthetic_build(count)
+                self.assertEqual(len(self.verify(dist, payload, seal)), count)
+
+    def test_missing_extra_same_size_mutation_and_larger_payload_are_rejected(self):
+        dist, payload, seal = self.synthetic_build()
+        first = sorted(payload)[0]
+        missing = dict(payload)
+        del missing[first]
+        extra = dict(payload, **{'assets/unreviewed.txt': b'extra'})
+        same_size = dict(payload, **{first: b'x' * len(payload[first])})
+        larger = dict(payload, **{first: payload[first] + b'extra'})
+        for changed in (missing, extra, same_size, larger):
+            with self.subTest(paths=len(changed), first=changed.get(first)), self.assertRaises(ValueError):
+                self.verify(dist, changed, seal)
+
+    def test_forged_index_sha_size_file_set_or_source_identity_is_rejected(self):
+        dist, payload, seal = self.synthetic_build()
+        first = sorted(payload)[0]
+        for change in ('sha', 'bytes', 'missing', 'extra', 'source'):
+            value = json.loads(seal)
+            if change == 'sha':
+                value['files'][first]['sha256'] = '0' * 64
+            elif change == 'bytes':
+                value['files'][first]['bytes'] += 1
+            elif change == 'missing':
+                del value['files'][first]
+            elif change == 'extra':
+                value['files']['assets/unreviewed.txt'] = {'bytes': 1, 'sha256': '0' * 64}
+            else:
+                value['web_commit'] = 'c' * 40
+            forged = json_bytes(value)
+            # The forged index has a matching own hash, but must still fail the
+            # independent immutable-dist and identity comparisons.
+            with self.subTest(change=change), self.assertRaises(ValueError):
+                self.verify(dist, payload, forged)
+
+    def test_reviewed_asset_index_hash_and_canonical_build_bytes_are_bound(self):
+        dist, payload, seal = self.synthetic_build()
+        with self.assertRaises(ValueError):
+            self.verify(dist, payload, seal, '0' * 64)
+        # Equivalent JSON with different bytes cannot replace the reviewed seal.
+        with self.assertRaises(ValueError):
+            self.verify(dist, payload, seal + b' ', sha256(seal))
+        first = sorted(payload)[0]
+        (dist / first).write_bytes(b'x' * len(payload[first]))
+        with self.assertRaises(ValueError):
+            self.verify(dist, payload, seal)
 
 
 if __name__ == '__main__':

@@ -133,7 +133,7 @@ try {
     $Identity = Read-Json (Join-Path $Root 'web-source.json')
     # A stale report cannot satisfy a fresh invocation, even if the process exits 0.
     foreach ($Phase in @('write', 'restart')) {
-        foreach ($Suffix in @('.json', '.json.host-start.json', '.json.host-stop.json')) {
+        foreach ($Suffix in @('.json', '.native.json', '.json.host-start.json', '.json.host-stop.json')) {
             $Old = Join-Path $Output ($Phase + $Suffix)
             if (Test-Path -LiteralPath $Old) { Remove-Item -LiteralPath $Old -Force }
         }
@@ -234,6 +234,17 @@ try {
         Require-RuntimeReport $Result $Phase $Started $Identity $Report $StartPath
         if ($Phase -ceq 'write') { $WriteSnapshot = $Result.persistence.snapshot }
         $PhaseReceipt.python_report_sha256 = (Get-FileHash -LiteralPath $Report -Algorithm SHA256).Hash.ToLowerInvariant()
+        # Export only the already verified public report bytes, never its private
+        # baseline backup. Preserve original and annotated identities separately.
+        $NativePath = Join-Path $Output ($Phase + '.native.json')
+        Copy-Item -LiteralPath $Report -Destination $NativePath -ErrorAction Stop
+        $NativeSHA = (Get-FileHash -LiteralPath $NativePath -Algorithm SHA256).Hash.ToLowerInvariant()
+        Require ($NativeSHA -ceq $PhaseReceipt.python_report_sha256 -and
+            $NativeSHA -ceq $PhaseReceipt.native_content_contract.report.sha256) 'Native report copy differs from verified bytes'
+        $PhaseReceipt.native_report = [ordered]@{
+            file = ($Phase + '.native.json'); bytes = (Get-Item -LiteralPath $NativePath).Length; sha256 = $NativeSHA
+        }
+
         # Established field, now backed by this run's actual host observations.
         $Result.physicalNetworkDisabled = $true
         Write-Json $Report $Result

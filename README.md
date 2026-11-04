@@ -4,7 +4,7 @@
 
 安装包内置模型、6,239 条官方矿物目录、晶胞与物性元数据及 117 张经来源审核的本地标本照片。启动和本机识别不需要先联网下载；官方 PDF、图片来源原页与用户自行配置的联网辅助需要联网。请先阅读 App 内的新用户指南，采用多角度照片和物性复核，将结果视为候选线索。
 
-资料数量不等于识别类别数量。随包模型仍为继承的 98 个标签权重，新八类小样本重训未达到 Kappa 0.95，未进入正式包；旧数据发现训练与评估重复，旧分数不能用作独立准确率证明。真实石英与非矿物照片只用于桌面运行检查，不能证明实验室泛化准确率。详细来源与重训报告随共享网页资料保留。
+资料数量不等于识别类别数量。随包模型仍为继承的 98 个标签权重，本次重训尚无独立 Kappa 约 0.80 的验收证据，研究权重未进入正式包；旧数据发现训练与评估重复，旧分数不能用作独立准确率证明。真实石英与非矿物照片只用于桌面运行检查，不能证明实验室泛化准确率。详细来源与重训报告随共享网页资料保留。
 
 本分支提供待验收的源码与 CI 构建产物，没有自动发布新版。正式安装包确认后放在本仓库 [Releases](https://github.com/3497907003-sketch/shikuang-desktop/releases)。旧版 Release 不会随本分支更新。
 
@@ -37,8 +37,11 @@ python -m PyInstaller --noconfirm Shikuang.spec
 
 ## Windows 开发包核验与发布边界
 
-当前开发包身份以 `web-source.json`、模型和资源 manifest 为准：canonical 构建含 168 项离线资产、4 个继承模型（3 个分类器与 1 个输入筛查）及 190 条已审书籍来源表述。`.github/workflows/draft-upload.yml` 与 `tools/verify_windows_delivery.py` 仍固定旧来源合同，不能用于当前开发包；本轮未修改或运行该发布门。
+当前开发包身份以 `web-source.json`、模型和资源 manifest 为准：canonical 构建含 168 项离线资产、4 个继承模型（3 个分类器与 1 个输入筛查）及已审书籍来源表述。`tools/verify_windows_delivery.py` 的资产集合现从精确 Web 构建与经 SHA 固定的包内索引派生，候选构建证据必须显式绑定 CI run/attempt、桌面/Web 提交、版本/tag 及 artifact ID/digest/大小。`.github/workflows/draft-upload.yml` 已移除历史默认值，恢复为仅手动、显式证据调度。native-v2 适配复用既有公共校验，严格关联原始报告、主机网络注释后报告、nonce、进程与网络恢复记录；私有备份只在构建机验证，明确排除上传。旧包没有新原始/最终绑定证明会拒绝，不能将本地软件检查当作上传或验收通过。本次源码修正的本地回归不构成新安装包、真机或发布验收；尚未填入未经验证的候选构建证据。
 
 现有开发 ZIP 已核验完整 SHA256/CRC、x64 PE、168 项 Web payload 与固定 WebView2 的全部 256 文件 seal。此处记录开发包静态身份与完整性证据；既有 Windows Server 2022 x64 VM 断网和重启烟测保持原范围，不代表安装器、实体 Windows 10/11、相机或保存对话框、识别准确率及独立 Kappa 验收。
 
 正式发布仍须新权重独立验收、实体设备验证，以及绑定当前精确来源和已审产物的发布门；本段不构成上传或发布授权。已封存开发 ZIP 保持原样，工作树中的说明修订不会自动进入既有包。
+
+
+Windows 候选上传的离线准备：审查者提供独立的 UTF-8 JSON 文件及其 SHA256，字段必须精确为 `schema_version`（1）、`repository`、正整数 `run_id` / `run_attempt`、40位 `source_commit` / `web_commit`、`app_version`、与版本相同的 `tag`、`asset_index_sha256` 和 `artifact`（精确 `id` / `size_in_bytes` / `digest`）。索引 SHA 取自同一实际构建的 `web/.web-assets.json`，并由 artifact 中的新 `windows-build-provenance.json` 固定到对应 CI attempt。该生成索引不属于 Git 跟踪文件，核验仍要从所固定 Web 提交重建全部资产并逐项比较，不能仅信任工作树索引。当前未建立新候选证据文件、没有调度或执行上传；正式候选仍须先完成当前运行协议和两轮多端回归。

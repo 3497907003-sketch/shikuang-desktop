@@ -1,22 +1,15 @@
-name: Verify Windows artifact and upload draft only
+name: Verify reviewed Windows native-v2 artifact and upload draft only
 on:
   workflow_dispatch:
     inputs:
-      verified_windows_run_id:
-        description: Successful desktop.yml run containing the tested Windows package
+      reviewed_build_evidence:
+        description: Explicit reviewed build evidence JSON; no historical run or commit defaults
         required: true
         type: string
-        default: '38072571180'
-      source_commit:
-        description: Immutable desktop commit actually built and runtime-tested
+      reviewed_evidence_sha256:
+        description: SHA256 of the exact UTF-8 evidence JSON, supplied independently of the artifact
         required: true
         type: string
-        default: '3f94d9aeae55cd8c1bb342ab3e937c8f2307c262'
-      tag:
-        description: Draft prerelease tag; never published by this workflow
-        required: true
-        type: string
-        default: v2.5.0-preview.1
 permissions:
   contents: write
   actions: read
@@ -25,13 +18,14 @@ concurrency:
   cancel-in-progress: false
 jobs:
   verify-and-stage:
+    # Only an explicit evidence file/SHA can select a successful immutable build.
+    # Legacy artifacts lack current raw/final report bindings and are rejected.
     runs-on: ubuntu-24.04
     timeout-minutes: 40
     env:
       GH_TOKEN: ${{ github.token }}
-      RUN_ID: ${{ inputs.verified_windows_run_id }}
-      SOURCE_COMMIT: ${{ inputs.source_commit }}
-      RELEASE_TAG: ${{ inputs.tag }}
+      REVIEWED_BUILD_EVIDENCE: ${{ inputs.reviewed_build_evidence }}
+      REVIEWED_EVIDENCE_SHA256: ${{ inputs.reviewed_evidence_sha256 }}
     steps:
       - uses: actions/checkout@v4
         with:
@@ -43,12 +37,20 @@ jobs:
       - name: Test delivery guards without any upload
         working-directory: uploader
         run: python -m unittest discover -s tests -p test_delivery.py -v
+      - name: Save the exact explicitly reviewed evidence without shell interpolation
+        run: |
+          python - <<'PYCODE'
+          import os
+          from pathlib import Path
+          Path(os.environ['RUNNER_TEMP'], 'reviewed-build-evidence.json').write_bytes(
+              os.environ['REVIEWED_BUILD_EVIDENCE'].encode('utf-8'))
+          PYCODE
       - name: Guard build provenance and draft target
         id: guard
         run: |
           python uploader/tools/verify_windows_delivery.py guard \
-            --repository "$GITHUB_REPOSITORY" --run-id "$RUN_ID" \
-            --source-commit "$SOURCE_COMMIT" --tag "$RELEASE_TAG" \
+            --evidence "$RUNNER_TEMP/reviewed-build-evidence.json" \
+            --expected-evidence-sha256 "$REVIEWED_EVIDENCE_SHA256" \
             --output "$RUNNER_TEMP/verified-context.json" --github-output "$GITHUB_OUTPUT"
       - uses: actions/checkout@v4
         with:
@@ -74,12 +76,15 @@ jobs:
         run: |
           python uploader/tools/verify_windows_delivery.py verify-download \
             --context "$RUNNER_TEMP/verified-context.json" \
+            --expected-evidence-sha256 "$REVIEWED_EVIDENCE_SHA256" \
             --desktop-source verified-desktop --web-dist verified-web/dist \
             --output "$RUNNER_TEMP/windows-delivery"
       - name: Upload Windows only to reviewed draft prerelease
         run: |
           python uploader/tools/verify_windows_delivery.py upload \
-            --context "$RUNNER_TEMP/verified-context.json" --directory "$RUNNER_TEMP/windows-delivery"
+            --context "$RUNNER_TEMP/verified-context.json" \
+            --expected-evidence-sha256 "$REVIEWED_EVIDENCE_SHA256" \
+            --directory "$RUNNER_TEMP/windows-delivery"
       - name: Keep verification report even if staging fails
         if: always()
         uses: actions/upload-artifact@v4
